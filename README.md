@@ -8,7 +8,7 @@ Every new agent on a team usually starts from zero and pays again for the same c
 
 ```mermaid
 flowchart TD
-    A[Set tasks + budget] --> B[Spawn researchers]
+    A[Load dataset + set budget] --> B[Spawn researchers]
     B --> C[Read memory]
     C --> D[Run experiments]
     D --> E[Report results]
@@ -16,7 +16,7 @@ flowchart TD
     F --> G[Update memory]
     G --> H{Generations left?}
     H -- Yes --> B
-    H -- No --> I[Test on unseen tasks]
+    H -- No --> I[Score on test split]
     I --> J[Compare scores]
 ```
 
@@ -24,7 +24,7 @@ flowchart TD
 2. Each researcher reads memory, runs experiments to lower val loss, and reports what it learned.
 3. The curator double-checks claims, resolves conflicts and updates memory.
 4. The next generation starts fresh from the updated memory.
-5. At the end, the system is evaluated on unseen tasks using a hidden test set.
+5. At the end, the starting and best `train.py` are scored once on the hidden test split.
 
 ## Memory
 
@@ -47,17 +47,21 @@ Rules for the memory:
 | File | Access |
 |---|---|
 | `train.py` | The only file agents can edit |
-| `test.py` | Locked; agents can't see or edit it |
+| `test.py` | Locked; agents can't see, edit or run it. Only the orchestrator runs it, at the end |
 
 ## Data
 
-| Split | Use |
-|---|---|
-| Train | Training |
-| Val | Scoring during research |
-| Test | Hidden; used only for the final before-and-after comparison |
+One dataset, split three ways. There are no other datasets.
 
-Unseen tasks are new datasets with the same three splits.
+| Split | Who sees it | Use |
+|---|---|---|
+| Train | Researchers, curator | Training |
+| Val | Researchers, curator | Scoring during research (`run_code` returns val loss) |
+| Test | No agent | Final before-and-after comparison only, run by `test.py` |
+
+- Researchers never see the test split: not its data, its loss, or any score built from it.
+- The curator doesn't see it either. It verifies claims on val, because what it learns goes into memory, and researchers read memory.
+- The sandbox that `run_code` uses only gets the train and val splits.
 
 ## Tools
 
@@ -86,7 +90,7 @@ The orchestrator is a plain Python script, not an agent.
   - Researchers only, capped at about 2 searches per lifetime.
   - Web ideas are hypotheses, not facts. Only results from `run_code` become memories.
 - **Budget:** enforced inside `run_code` (fixed steps or time), so no one wins by training longer.
-- **Test set:** stays locked so agents can't game the score.
+- **Test split:** no agent can read it or get a score on it, so nothing tuned on it leaks into memory or `train.py`.
 
 ## Curation
 
@@ -106,15 +110,16 @@ Each generation, the N researchers are ranked by **gain over the generation's st
 
 ```
 gain    = (L0 − Lbest) / L0
-fitness = average gain across tasks and seeds
+fitness = average gain across seeds
 ```
 
 - **`L0`:** baseline loss of the starting `train.py`.
-- **`Lbest`:** best val loss reached within the budget.
+- **`Lbest`:** loss of the best `train.py` reached within the budget.
+- During research, both are val loss. For the final score, `test.py` measures both on the test split, with the best `train.py` picked by val loss.
 
 ## Evaluation
 
-All setups use the same unseen tasks and the same budget.
+All setups use the same dataset and budget, and are scored on the same test split.
 
 | Setup | What it shows |
 |---|---|
@@ -125,7 +130,7 @@ All setups use the same unseen tasks and the same budget.
 
 We track four metrics per generation:
 
-- **Quality:** fitness on the test set.
+- **Quality:** fitness on the test split.
 - **Waste:** runs that repeat a known dead end.
 - **Memory size:** stays flat while the raw log grows.
 - **Cost:** tokens and time-to-first-token per agent. The memory is a shared prompt prefix, so Crusoe's KV cache reuses it.
