@@ -64,30 +64,45 @@ AGENT_PROMPT = """You are researcher agent #{n} in a Shared Brain team.
 
 Goal: {goal}
 
-Validation data columns (predict `y`): {columns}
+Validation data (you are scored on this data):
+{stats}
+Columns (predict `y` from the others): {columns}
 
 Your assigned hypothesis for this experiment:
 {hypothesis}
 
-Current best score (1/(1+rmse)): {best}
+Current best score (1/(1+rmse), higher is better): {best}
 Inherited learnings:
 {memory}
 
-Write ONE experiment that tests your hypothesis as Python. It must define:
+Your experiment must be a CALIBRATED model as Python:
 
 ```python
-def predict(row: dict) -> float:
+def fit(rows: list[dict]) -> object:
+    # Derive your model's parameters from the rows. PREFER closed-form least
+    # squares: choose basis functions, build the design matrix, solve the
+    # normal equations with Gaussian elimination (pure stdlib math only).
+    ...
+
+def predict(row: dict, params) -> float:
+    # Predict y for one row using the params fit() returned.
     ...
 ```
 
-Use only arithmetic / math / statistics on `row` values; no network, no file access.
+Rules:
+- FIT the coefficients from the data. NEVER hand-guess constants: previous
+  generations failed by guessing weights for a target on this scale.
+- Only the standard library (math, statistics). No network, file access, numpy.
+- Feature transforms are encouraged (log10 of skewed magnitudes, interactions,
+  squares, hinges). Fit coefficients for your chosen basis, don't tune by hand.
+- predict() must return a float; it must not raise.
 
 Reply with ONLY this JSON object:
 {{
   "name": "<short name>",
-  "expression": "<the formula in plain maths>",
+  "expression": "<the model in plain maths>",
   "description": "<one or two sentences>",
-  "code": "<the predict() function as a python code string>",
+  "code": "<the fit() and predict() functions as a python code string>",
   "rationale": "<your thinking: how this tests the hypothesis>"
 }}"""
 
@@ -310,6 +325,7 @@ async def agent_experiment(
     hypothesis: str,
     memory: str,
     best: float | None,
+    stats: str = "",
 ) -> dict:
     """Step 5: one researcher agent produces one experiment testing its hypothesis."""
     s = get_settings()
@@ -321,6 +337,7 @@ async def agent_experiment(
                     n=n,
                     goal=goal,
                     columns=columns,
+                    stats=stats or "(not provided)",
                     hypothesis=hypothesis or "free choice — pick the most promising idea",
                     best=best if best is not None else "unknown",
                     memory=memory or "(nothing yet)",

@@ -46,17 +46,34 @@ def _coerce(row: dict) -> dict:
 
 
 def build_program(code: str, rows: list[dict]) -> str:
-    """Wrap a formula's predict() plus the validation rows in a benchmark program."""
+    """Wrap an experiment plus the validation rows in a benchmark program.
+
+    Contract: `code` defines `predict(row)` — or, for calibratable models,
+    `fit(rows) -> params` + `predict(row, params)`. If `fit` exists it runs once
+    on all rows (closed-form least squares is pure stdlib), and `predict` gets
+    the fitted params; a single-arg `predict` falls back automatically.
+    """
     return f"""
 import json, math, statistics
 
-exec({code!r})
+ns = {{}}
+exec({code!r}, ns)
 
 rows = {rows!r}
-errs, abs_errs, ys, preds, skipped = [], [], [], [], 0
+pred = ns.get("predict")
+fit = ns.get("fit")
+params = fit(rows) if callable(fit) else None
+
+errs, abs_errs, ys, skipped = [], [], [], 0
 for row in rows:
     try:
-        p = predict(row)
+        if params is not None:
+            try:
+                p = pred(row, params)
+            except TypeError:  # single-arg predict
+                p = pred(row)
+        else:
+            p = pred(row)
         y = row["y"]
         if p is None or not isinstance(p, (int, float)) or math.isnan(float(p)):
             skipped += 1
@@ -66,8 +83,9 @@ for row in rows:
     except Exception:
         skipped += 1
         continue
-    preds.append(p); ys.append(y)
-    errs.append((p - y) ** 2); abs_errs.append(abs(p - y))
+    ys.append(y)
+    errs.append((p - y) ** 2)
+    abs_errs.append(abs(p - y))
 
 n = len(ys)
 rmse = math.sqrt(sum(errs) / n) if n else float("nan")

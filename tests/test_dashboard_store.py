@@ -82,7 +82,7 @@ async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
 
     seen = {}
 
-    async def fake_agent(n, goal, cols, hyp, mem, best):
+    async def fake_agent(n, goal, cols, hyp, mem, best, stats=""):
         seen[n] = (hyp, mem, best)
         return {"name": f"a{n}", "expression": "y", "code": "def predict(row):\n    return 0.5"}
 

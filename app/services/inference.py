@@ -1,13 +1,16 @@
 """Crusoe Intelligence Foundry inference. The API is OpenAI-compatible."""
 
 import asyncio
+import logging
 import time
 from collections import deque
 from functools import lru_cache
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 from app.config import get_settings
+
+log = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -58,18 +61,32 @@ async def chat(
 
     Reasoning models spend `max_tokens` on thinking first; empty content with
     finish_reason == "length" means the budget was too small.
+
+    Rate limits: the client RPM limiter paces requests, and a 429 that survives
+    the SDK's own retries (empirically the account window is tighter than the
+    documented 30 RPM) triggers an adaptive cooldown + retry so one burst can't
+    fail a whole harness run.
     """
-    await _limiter().acquire()  # stay under the Crusoe RPM cap (429s kill runs)
-    started = time.perf_counter()
-    resp = await get_client().chat.completions.create(
-        model=model or get_settings().crusoe_default_model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        **kwargs,
-    )
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    return resp.choices[0].message.content or "", latency_ms
+    attempts = 3
+    for attempt in range(attempts):
+        await _limiter().acquire()
+        started = time.perf_counter()
+        try:
+            resp = await get_client().chat.completions.create(
+                model=model or get_settings().crusoe_default_model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return resp.choices[0].message.content or "", latency_ms
+        except RateLimitError:
+            if attempt == attempts - 1:
+                raise
+            log.warning("429 after SDK retries; cooling down 60s (attempt %d)", attempt + 1)
+            await asyncio.sleep(60)
+    return "", 0  # unreachable
 
 
 async def list_models() -> list[str]:

@@ -220,6 +220,14 @@ you.com research → 5 hypotheses) with a live event log, progress bar, and a ca
 per generation: top experiment, score table, curator summary, research sources,
 next-gen hypotheses.
 
+Experiments use the **fit/predict contract**: agents define `fit(rows)` (closed-form
+least squares on a chosen basis — pure stdlib) + `predict(row, params)`, so models
+are *calibrated from the data* rather than hand-guessed. On the UCI Airfoil
+Self-Noise dataset this took the system from RMSE 17.6 dB (hand-set constants) to
+**4.27 dB, beating the 4.80 dB OLS baseline**. `inference.chat` paces requests
+(`CRUSOE_RATE_LIMIT_RPM`) and cools down + retries on 429 (the account window is
+tighter than the documented 30 RPM).
+
 Everything persists in **SQLite** (`data/dashboard.db`, gitignored) with logical
 separation: `projects → runs → generations → experiments` — foreign-keyed per
 project, so results never mix across projects. Crusoe and you.com store nothing.

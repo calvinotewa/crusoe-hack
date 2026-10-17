@@ -120,7 +120,7 @@ async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch
     """Gen 1 promotes its verified top. Gen 2 improves within the noise floor, so no promotion."""
     rounds = iter([0.5, 0.4995])
 
-    async def fake_agent(n, goal, columns, hyp, mem, best):
+    async def fake_agent(n, goal, columns, hyp, mem, best, stats=""):
         return {
             "name": f"a{n}",
             "code": f"rmse={next(rounds)}",

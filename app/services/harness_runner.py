@@ -39,6 +39,21 @@ def coerce_row(row: dict) -> dict:
     return out
 
 
+def row_stats(rows: list[dict]) -> str:
+    """Compact data-scale summary for agent prompts (targets/features span wide
+    ranges on real datasets — agents need the scales to design their basis)."""
+    if not rows:
+        return "(empty)"
+    ys = [float(r["y"]) for r in rows if isinstance(r.get("y"), (int, float))]
+    ymean = sum(ys) / len(ys)
+    parts = [f"{len(rows)} rows; target y: min {min(ys):.3g}, max {max(ys):.3g}, mean {ymean:.3g}"]
+    for c in sorted(set(rows[0]) - {"y"}):
+        vals = [float(r[c]) for r in rows if isinstance(r.get(c), (int, float))]
+        if vals:
+            parts.append(f"{c}: {min(vals):.3g}..{max(vals):.3g}")
+    return "; ".join(parts)
+
+
 class HarnessRunner:
     """One orchestration run against one project's dataset. Persists via `store`.
 
@@ -120,6 +135,7 @@ class HarnessRunner:
             )
             hypotheses: list[str] = list(self.initial_hypotheses)
             columns = sorted(set(self.rows[0]) - {"y"}) if self.rows else []
+            stats = row_stats(self.rows)
             sem = asyncio.Semaphore(p["concurrency"])
 
             for gen in range(1, p["generations"] + 1):
@@ -138,7 +154,7 @@ class HarnessRunner:
                     async with sem:
                         hyp = hyps[(n - 1) % len(hyps)] if hyps else ""
                         exp = await shared_brain.agent_experiment(
-                            n, self.goal, columns, hyp, mem, self.state["best_score"]
+                            n, self.goal, columns, hyp, mem, self.state["best_score"], stats=stats
                         )
                         exp["hypothesis"] = hyp
                         return exp
@@ -165,7 +181,10 @@ class HarnessRunner:
                     async with sem:
                         if not exp.get("code"):
                             return {**exp, "score": 0.0, "stderr_tail": "no code"}
-                        res = await shared_brain.run_experiment(exp["code"], self.rows)
+                        # 60s: fitting (e.g. least squares over all rows) can be slower
+                        res = await shared_brain.run_experiment(
+                            exp["code"], self.rows, timeout=60.0
+                        )
                         return {**exp, **res}
 
                 btasks = [asyncio.create_task(bench_one(e)) for e in experiments]

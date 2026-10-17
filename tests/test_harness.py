@@ -195,6 +195,36 @@ def test_build_program_skips_crashing_rows():
     assert metrics["n"] == 0 and metrics["skipped"] == 3 and metrics["score"] == 0.0
 
 
+def test_build_program_supports_fit_predict_contract():
+    """The calibrated-model contract: fit(rows) -> params, predict(row, params)."""
+    rows = [{"a": 2.0, "y": 7.0}, {"a": 4.0, "y": 13.0}]
+    code = (
+        "def fit(rows):\n"
+        "    # y = 3*a + 1\n"
+        "    return [3.0, 1.0]\n"
+        "def predict(row, params):\n"
+        "    return params[0] * row['a'] + params[1]\n"
+    )
+    metrics = _run_program(code, rows)
+    assert metrics["n"] == 2 and metrics["skipped"] == 0
+    assert abs(metrics["rmse"]) < 1e-9 and metrics["score"] > 0.99
+
+
+def test_build_program_fit_with_single_arg_predict_falls_back():
+    rows = [{"a": 2.0, "y": 4.0}]
+    code = "def fit(rows):\n    return 99\n" + "def predict(row):\n    return row['a'] * 2\n"
+    metrics = _run_program(code, rows)
+    assert metrics["n"] == 1 and abs(metrics["rmse"]) < 1e-9
+
+
+def test_row_stats():
+    from app.services.harness_runner import row_stats
+
+    rows = [{"a": 1.0, "y": 3.0}, {"a": 2.0, "y": 5.0}]
+    s = row_stats(rows)
+    assert "target y" in s and "a: 1..2" in s
+
+
 def test_coerce_row():
     row = benchmarker._coerce({"a": " 1.5 ", "b": "", "c": "x", "y": "3"})
     assert row == {"a": 1.5, "b": None, "c": "x", "y": 3}
