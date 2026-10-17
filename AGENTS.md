@@ -14,6 +14,7 @@ Open the matching skill before working in that area. If your harness doesn't aut
 | `neon` | Postgres URLs/pooling/migrations, buckets, branches, `neon` CLI |
 
 ## Rules
+- Local setup is `scripts/setup.sh` (interactive, opens browsers). Don't run it yourself; ask the user to.
 - Before finishing: `uv run ruff check . && uv run ruff format . && uv run pytest`.
 - Tests never call Crusoe, Modal or the bucket. Monkeypatch the `app.services.*` functions.
 - Schema changes go through reviewed Alembic migrations, run against a Neon branch, never the main branch.

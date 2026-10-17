@@ -24,7 +24,8 @@ Condensed for this Python repo. Full official skills (Apache-2.0, TypeScript-ori
 ```bash
 neon link --project-id <id> -y              # once; writes .neon, pulls env
 neon checkout <branch> --create             # branch per feature/test; pulls that branch's env
-neon env pull                               # refresh .env / .env.local
+neon env pull --file .env -s postgres       # DATABASE_URL (pooled), DATABASE_URL_UNPOOLED, NEON_BRANCH
+neon env pull --file .env -s object-storage # AWS_*; issues a NEW credential on every call
 neon connection-string <branch>             # direct URL by default
 neon credentials create --scope storage:read --scope storage:write
 neon bucket create <name> | list | delete ; neon bucket object put|get|list|delete

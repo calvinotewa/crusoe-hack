@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -10,6 +11,17 @@ from botocore.config import Config
 
 from app.config import get_settings
 
+_REGION_RE = re.compile(r"[a-z]{2}(?:-[a-z]+)+-\d")
+
+
+def signing_region(region: str, endpoint: str) -> str:
+    """AWS-style region for SigV4. Tolerates a non-region AWS_REGION (e.g. a storage-cell
+    host) by falling back to the region embedded in the branch endpoint URL."""
+    for candidate in (region, endpoint):
+        if m := _REGION_RE.search(candidate or ""):
+            return m.group(0)
+    return "us-east-2"
+
 
 @lru_cache
 def _client():
@@ -17,7 +29,7 @@ def _client():
     return boto3.client(
         "s3",
         endpoint_url=s.aws_endpoint_url_s3 or None,
-        region_name=s.aws_region,
+        region_name=signing_region(s.aws_region, s.aws_endpoint_url_s3),
         aws_access_key_id=s.aws_access_key_id or None,
         aws_secret_access_key=s.aws_secret_access_key or None,
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
@@ -43,6 +55,10 @@ async def get_bytes(key: str) -> bytes:
 async def put_jsonl(key: str, rows: list[dict[str, Any]]) -> str:
     body = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows).encode()
     return await put_bytes(key, body, "application/x-ndjson")
+
+
+async def delete(key: str) -> None:
+    await asyncio.to_thread(_client().delete_object, Bucket=_bucket(), Key=key)
 
 
 async def get_jsonl(key: str) -> list[dict[str, Any]]:
