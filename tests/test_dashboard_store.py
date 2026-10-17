@@ -117,7 +117,14 @@ async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
 
     store = S(tmp_path / "t4.db")
     p = await store.create_project("p", "g", CSV, ["a", "b", "y"])
-    params = {"agents": 2, "hypotheses": 3, "generations": 1, "top_k": 2, "sources": 2, "concurrency": 2}
+    params = {
+        "agents": 2,
+        "hypotheses": 3,
+        "generations": 1,
+        "top_k": 2,
+        "sources": 2,
+        "concurrency": 2,
+    }
     run = await store.create_run(p["id"], params)
     runner = HarnessRunner(
         params,

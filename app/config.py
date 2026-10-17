@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     crusoe_curator_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     # SDK retries 429/5xx with exponential backoff (honours Retry-After)
     crusoe_max_retries: int = 6
+    # Client-side requests-per-minute cap (Crusoe free tier: 30; 429s fail runs).
+    # Set 0 to disable. Applied in inference.chat before every call.
+    crusoe_rate_limit_rpm: int = 24
 
     # Modal sandboxes (also read from ~/.modal.toml if unset)
     modal_token_id: str = ""
