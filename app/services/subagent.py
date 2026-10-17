@@ -62,13 +62,21 @@ async def run_json(prompt: str, *, shape: str, **kwargs) -> dict:
     return {}
 
 
-def worker_prompt(goal: str, columns: list[str], n: int) -> str:
+def worker_prompt(
+    goal: str, columns: list[str], n: int, hypothesis: str = "", memory: str = ""
+) -> str:
     """The instruction given to each worker agent (steps 2 and 7): beat the benchmark."""
     return f"""You are worker agent #{n} in a formula-discovery harness.
 
 Goal: {goal}
 
 Validation data columns (predict `y` from the other columns): {columns}
+
+Your assigned hypothesis for this experiment:
+{hypothesis or "(free choice — pick the most promising idea)"}
+
+Inherited learnings from previous generations:
+{memory or "(nothing yet)"}
 
 Write ONE candidate formula as Python. It must define:
 
@@ -77,7 +85,7 @@ Write ONE candidate formula as Python. It must define:
 ```
 
 Use only arithmetic / math / statistics on `row` values; no network, no file access.
-Explore boldly: vary transforms, interactions and non-linearities; don't just linear-regress.
+Your experiment should test your assigned hypothesis where one is given.
 
 Reply with ONLY this JSON object:
 {{
@@ -85,5 +93,5 @@ Reply with ONLY this JSON object:
   "expression": "<the formula in plain maths>",
   "description": "<one or two sentences: why this might work>",
   "code": "<the predict() function as a python code string>",
-  "rationale": "<your thinking: what you tried and why>"
+  "rationale": "<your thinking: how this tests the hypothesis>"
 }}"""

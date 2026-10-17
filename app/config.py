@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     crusoe_base_url: str = "https://api.inference.crusoecloud.com/v1"
     crusoe_default_model: str = "deepseek-ai/Deepseek-V4-Flash"
     crusoe_judge_model: str = "openai/gpt-oss-120b"
+    # Shared Brain roles (README): researchers propose experiments, curator summarizes
+    crusoe_researcher_model: str = "nvidia/Nemotron-3-Super-120B-A12B"
+    crusoe_curator_model: str = "nvidia/Nemotron-3-Ultra-550B"
     # SDK retries 429/5xx with exponential backoff (honours Retry-After)
     crusoe_max_retries: int = 6
 
@@ -33,11 +36,15 @@ class Settings(BaseSettings):
     modal_app_name: str = "crusoe-hack-sandboxes"
     sandbox_timeout_seconds: int = 120
 
-    # Orchestration harness (app/services/orchestrator.py)
-    # Worker count per generation; the brief says 100, mind Crusoe's 30 RPM on free accounts.
+    # Orchestration harness (app/services/orchestrator.py + shared_brain.py)
+    # Researcher count per generation; the spec says 100, mind Crusoe's 30 RPM free tier.
     harness_num_agents: int = 6
-    # Fraction of a generation that earns a slot in the inherited-learnings prompt (top 10%).
+    # Experiments whose thinking gets summarized per generation (spec: top 10).
+    harness_top_k: int = 10
+    # Fraction of a generation that earns a slot in the inherited-learnings prompt.
     harness_top_fraction: float = 0.1
+    # Hypotheses the curator generates per generation (spec: 100).
+    harness_num_hypotheses: int = 10
     # Generations per POST /sessions; more via POST /sessions/{id}/iterate.
     harness_max_generations: int = 3
 

@@ -64,6 +64,61 @@ def test_worker_prompt_contract():
     assert "predict y" in p and "'a'" in p
 
 
+def test_worker_prompt_carries_hypothesis_and_memory():
+    p = subagent.worker_prompt(
+        "goal", ["a"], 1, hypothesis="try interactions", memory="linear failed"
+    )
+    assert "try interactions" in p and "linear failed" in p
+
+
+# --- Shared Brain loop helpers (services/shared_brain.py) ---
+
+
+def test_parse_numbered_list():
+    from app.services import shared_brain
+
+    text = "1. Use log transforms\n2) Try interaction terms\n\nnot a list line\n"
+    assert shared_brain.parse_numbered_list(text) == ["Use log transforms", "Try interaction terms"]
+
+
+async def test_generate_hypotheses_batches(monkeypatch):
+    from app.services import shared_brain
+
+    async def fake_curate(prompt):
+        assert "hypotheses" in prompt.lower() or "hypothesis" in prompt.lower()
+        return "1. alpha idea\n2. beta idea"
+
+    monkeypatch.setattr(shared_brain, "_curate", fake_curate)
+    out = await shared_brain.generate_hypotheses("goal", "summary", "research", 4, batch=2)
+    assert len(out) == 4 and out[0] == "alpha idea"
+
+
+async def test_web_search_fallback_is_safe(monkeypatch):
+    """No YOU_API_KEY and a failing web fetch -> empty list, not an exception."""
+    import app.services.inference  # noqa: F401  (ensure app import works)
+    from app.services import shared_brain
+
+    async def failing_ddg(query, n):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(shared_brain, "_ddg_search", failing_ddg)
+    monkeypatch.delenv("YOU_API_KEY", raising=False)
+    assert await shared_brain.web_search("anything") == []
+
+
+async def test_agent_experiment_parses_json(monkeypatch):
+    from app.services import shared_brain
+
+    async def fake_chat(messages, model=None, temperature=0.7, max_tokens=4096, **kw):
+        return '{"name": "h", "expression": "y~a", "code": "def predict(row):\\n    return 1"}', 3
+
+    import app.services.inference as inference_mod
+
+    monkeypatch.setattr(inference_mod, "chat", fake_chat)
+    out = await shared_brain.agent_experiment(1, "goal", ["a"], "hyp", "mem", 0.5)
+    assert out["name"] == "h"
+
+
 # --- step 3: the benchmark program ---
 
 

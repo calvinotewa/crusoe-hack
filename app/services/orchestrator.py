@@ -1,26 +1,17 @@
-"""The orchestration harness: a generational loop that tries to beat a benchmark.
+"""The orchestration harness (API path): a generational Shared Brain loop.
 
-One session, per the hackathon brief, runs these steps per generation:
+Per the spec, each generation runs:
+1. Run all experiments (N researcher agents propose formulae; every formula is
+   benchmarked against the validation CSV in Modal sandboxes).
+2. Summarize the thinking of the top 10 experiments (curator model).
+3. Supplement the summary's learnings with a web search on what could improve it.
+4. Generate hypotheses on improvement ideas (curator model).
+5. The next generation's agents produce experiments based on those hypotheses.
 
-1. (once, at session creation) Ingest the validation CSV + seed formulae into the
-   multi-tenant store (Neon bucket + Postgres rows); see routes/sessions.py.
-2. runSubAgent x N: workers propose alternative formulae for the maths goal
-   (services/subagent.py + services/formulae.py: store_formulae).
-3. Run every formula of the generation against the validation CSV in Modal sandboxes
-   and store benchmarks (services/benchmarker.py).
-4. Summarise the session thinking of the best 3 and consolidate the learnings
-   (services/research.summarise_session).
-5. Research: "if the agents knew X" — fetch `research_num_sources` new sources via
-   you.com (services/research.research_gaps).
-6. Rewrite the system prompt: general human task + consolidated inherited learnings +
-   research learnings (services/knowledge.rewrite_prompt); expose the RAG read tool
-   (knowledge.read_findings, GET /sessions/{id}/findings).
-7. The next generation's workers use the new prompt to propose formulae that try to
-   beat the benchmark (worker_prompt in services/subagent.py).
-
-Steps 2..7 repeat for `harness_max_generations` generations (or more via
-POST /sessions/{id}/iterate). All provider calls (Crusoe, Modal, you.com, bucket) stay
-inside services; the loop is one BackgroundTask per request, like evaluator.execute_run.
+`app/services/shared_brain.py` holds the same flow as in-memory pure functions;
+`scripts/shared_brain_mvp.py` runs it standalone with only CRUSOE_API_KEY.
+All provider calls (Crusoe, Modal, you.com, bucket) stay inside services; the loop
+is one BackgroundTask per request, like evaluator.execute_run.
 """
 
 import asyncio
@@ -33,7 +24,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Benchmark, Formula, HarnessSession, HarnessStatus
-from app.services import benchmarker, knowledge, research, subagent
+from app.services import benchmarker, knowledge, research, shared_brain, subagent
 from app.services.formulae import store_formulae
 
 log = logging.getLogger(__name__)
@@ -53,24 +44,37 @@ async def _top_formulae(session_id, generation: int, n: int = 3):
         return [(f, b) for f, b in (await session.execute(stmt)).all()][:n]
 
 
-async def run_generation(session_id, generation: int) -> float:
-    """Steps 2-7 for one generation. Returns the generation's best score."""
+async def run_generation(session_id, generation: int, hypotheses: list[str], memory: str):
+    """One generation of the Shared Brain loop. Returns (best, next_hypotheses, memory).
+
+    1. Run all experiments (N runSubAgent workers -> Modal-sandboxed benchmarks).
+    2. Summarize the thinking of the top 10 experiments (curator).
+    3. Supplement the summary with a web search on what could improve it.
+    4. Generate `harness_num_hypotheses` improvement hypotheses (curator).
+    5. Next generation's agents get the hypotheses round-robin (caller passes them back).
+    """
     s = get_settings()
 
     async with SessionLocal() as session:
         harness = await session.get(HarnessSession, session_id)
         goal, system_prompt = harness.goal, harness.system_prompt
-        # Step 3 input: the validation CSV (bucket) for the worker prompts + benchmarks.
+        # Step 1 input: the validation CSV (bucket) for the worker prompts + benchmarks.
         rows = await benchmarker.get_validation_rows(harness)
     columns = sorted(set(rows[0].keys()) - {"y"}) if rows else []
 
-    # --- Step 2: runSubAgent x N — workers propose alternative formulae ---
+    # --- Step 5/1: N agents produce experiments testing their assigned hypotheses ---
     sem = asyncio.Semaphore(4)  # Crusoe free tier: 30 RPM
 
     async def _worker(n: int) -> dict:
         async with sem:
             return await subagent.run_json(
-                subagent.worker_prompt(goal, columns, n),
+                subagent.worker_prompt(
+                    goal,
+                    columns,
+                    n,
+                    hypothesis=hypotheses[(n - 1) % len(hypotheses)] if hypotheses else "",
+                    memory=memory,
+                ),
                 shape="name, expression, description, code, rationale",
                 system_prompt=system_prompt,
             )
@@ -101,15 +105,15 @@ async def run_generation(session_id, generation: int) -> float:
         parent_id=parent_id,
     )
 
-    # --- Step 3: benchmark all of them against the validation CSV in sandboxes ---
+    # --- Step 1 cont.: benchmark all of them against the validation CSV in sandboxes ---
     metrics = await benchmarker.benchmark_generation(session_id, generation)
     by_formula = {m["formula_id"]: m for m in metrics}
     for f in created:
         m = by_formula.get(str(f.id), {})
         await benchmarker.store_benchmark(f.id, generation, m)
 
-    # --- Step 4: best 3, summarise the session thinking, consolidate ---
-    top = await _top_formulae(session_id, generation, 3)
+    # --- Step 2: summarize the thinking of the top 10 experiments ---
+    top = await _top_formulae(session_id, generation, s.harness_top_k)
     best = max((b.score for _, b in top if b.score is not None), default=None)
     async with SessionLocal() as session:
         harness = await session.get(HarnessSession, session_id)
@@ -118,7 +122,7 @@ async def run_generation(session_id, generation: int) -> float:
         )
         await session.commit()
 
-    # --- Step 5: research the gaps ("if the agents knew X") via you.com ---
+    # --- Step 3: supplement the summary with a web search on what could improve it ---
     query, sources = await research.research_gaps(
         harness, [f for f, _ in top], [b for _, b in top], generation
     )
@@ -126,8 +130,16 @@ async def run_generation(session_id, generation: int) -> float:
         h2 = await session.get(HarnessSession, session_id)
         h2.research_query = query
         await session.commit()
+    learnings = (
+        "\n".join(f"- {src.title}: {src.snippet or src.url}" for src in sources) or "(no results)"
+    )
 
-    # --- Step 6: rewrite the system prompt (task + inherited + research) for gen n+1 ---
+    # --- Step 4: generate N hypotheses on improvement ideas (curator) ---
+    next_hypotheses = await shared_brain.generate_hypotheses(
+        goal, harness.summary or "", learnings, s.harness_num_hypotheses, concurrency=4
+    )
+
+    # --- Step 6 (unchanged): rewrite the system prompt (task + inherited + research) ---
     new_prompt = await knowledge.rewrite_prompt(harness)
     async with SessionLocal() as session:
         h3 = await session.get(HarnessSession, session_id)
@@ -136,7 +148,7 @@ async def run_generation(session_id, generation: int) -> float:
         h3.best_score = max(known_best) if known_best else None
         await session.commit()
 
-    return best or 0.0
+    return best, next_hypotheses, new_prompt
 
 
 async def execute_session(session_id: uuid.UUID, generations: int | None = None) -> None:
@@ -151,9 +163,14 @@ async def execute_session(session_id: uuid.UUID, generations: int | None = None)
         start = harness.generation + 1
 
     try:
-        # gen 0 = seeds (stored at session creation, step 1); loop runs 1..N
+        # gen 0 = seeds (stored at session creation, step 1); loop runs 1..N.
+        # Hypotheses and the rewritten prompt flow from each generation to the next.
+        hypotheses: list[str] = []
+        memory = ""
         for generation in range(start, start + (generations or s.harness_max_generations)):
-            score = await run_generation(session_id, generation)
+            score, hypotheses, memory = await run_generation(
+                session_id, generation, hypotheses, memory
+            )
             async with SessionLocal() as session:
                 h = await session.get(HarnessSession, session_id)
                 h.generation = generation
