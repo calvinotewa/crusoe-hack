@@ -60,6 +60,18 @@ class RunStart(BaseModel):
     concurrency: int = Field(default=4, ge=1, le=10)
 
 
+class RunContinue(BaseModel):
+    """Continue a run's project with MORE generations, inheriting its knowledge:
+    the benchmark to beat, the last hypotheses, and the last summary + learnings."""
+
+    generations: int = Field(default=2, ge=1, le=10)
+    agents: int | None = Field(default=None, ge=1, le=100)
+    hypotheses: int | None = Field(default=None, ge=1, le=100)
+    top_k: int | None = Field(default=None, ge=1, le=10)
+    sources: int | None = Field(default=None, ge=0, le=20)
+    concurrency: int | None = Field(default=None, ge=1, le=10)
+
+
 # --- html ---------------------------------------------------------------
 
 
@@ -151,6 +163,72 @@ async def stop_run(rid: str) -> dict:
         if task.get_coro().__qualname__.startswith("HarnessRunner.run"):
             task.cancel()
     return {"status": "cancelling"}
+
+
+@app.post("/api/runs/{rid}/continue", status_code=202)
+async def continue_run(rid: str, body: RunContinue) -> dict:
+    """Invest more in a project: a NEW run in the same project that inherits the
+    previous run's knowledge (best score to beat, last hypotheses, last summary
+    + web learnings) and runs `body.generations` more generations."""
+    prev = await store.get_run(rid)
+    if not prev:
+        raise HTTPException(404, "run not found")
+    project = await store.get_project(prev["project_id"])
+    if not project:
+        raise HTTPException(404, "project not found")
+
+    params = dict(prev.get("params") or {})
+    for k, v in body.model_dump(exclude={"generations"}).items():
+        if v is not None:
+            params[k] = v
+    params["generations"] = body.generations
+
+    # inherit knowledge: the best score across the project is the benchmark to beat
+    best = max(
+        (
+            x
+            for x in [
+                prev.get("best_score"),
+                *(r.get("best_score") for r in project.get("runs", [])),
+            ]
+            if x is not None
+        ),
+        default=None,
+    )
+
+    # last generation's hypotheses (kept at the fixed count) + memory from its summary
+    gens = prev.get("generations") or []
+    last = gens[-1] if gens else None
+    hyps = [h for h in (last or {}).get("hypotheses", []) if h]
+    n = int(params.get("hypotheses", 20))
+    while len(hyps) < n:  # keep the fixed count exact
+        hyps.append(f"Open question: what else could beat {best}? (slot {len(hyps) + 1})")
+    memory = ""
+    if last:
+        learnings = (
+            "\n".join(f"- {s['title']} ({s['url']})" for s in last.get("sources", []))
+            or "(no results)"
+        )
+        memory = (
+            f"## Last generation's summary\n{last.get('summary') or ''}\n\n"
+            f"## Web learnings\n{learnings}"
+        )
+
+    run = await store.create_run(prev["project_id"], params, continued_from=rid)
+    rows = [coerce_row(r) for r in csv.DictReader(io.StringIO(project["dataset_csv"]))]
+    runner = HarnessRunner(
+        params,
+        project["goal"],
+        rows,
+        store,
+        run["id"],
+        initial_hypotheses=hyps,
+        initial_memory=memory,
+        initial_best_score=best,
+    )
+    runners[run["id"]] = runner
+    asyncio.get_running_loop().create_task(runner.run())
+    return run
 
 
 def import_legacy_runs() -> int:

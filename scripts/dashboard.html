@@ -137,6 +137,7 @@ async function viewProject(pid) {
   const runs = (p.runs || []).map((r) => `
     <div class="proj" onclick="location.hash = '#/runs/${r.id}'">
       <div class="row"><strong class="mono">${esc(r.id)}</strong>
+        ${r.continued_from ? `<span class="hint">↳ continued from <span class="mono">${esc(r.continued_from)}</span></span>` : ""}
         <span class="badge ${esc(r.status)}">${esc(r.status)}</span>
         <span class="mono">best ${fmt(r.best_score)}</span>
         <span class="hint">${(r.started_at || "").slice(0, 16).replace("T", " ")} ·
@@ -229,7 +230,17 @@ async function viewRun(rid) {
           <div><div class="hint">best score (higher = better)</div><div class="score mono">${fmt(r.best_score)}</div></div>
         </div>
         <div class="bar"><i style="width:${Math.min(100, frac * 100)}%"></i></div>
-        ${running ? '<button id="r-stop" class="secondary" style="width:100%">■ Stop run</button>' : ""}
+        ${running ? '<button id="r-stop" class="secondary" style="width:100%">■ Stop run</button>' : `
+        <div class="card" style="margin-top:10px">
+          <h2>Invest more: continue this project</h2>
+          <div class="hint">Starts a NEW run in the same project that inherits this run's knowledge:
+          the benchmark to beat (${fmt(r.best_score)}), its last hypotheses and its last summary + web learnings.</div>
+          <div class="formgrid" style="margin-top:8px">
+            <div><label>More generations</label><input id="c-gens" type="number" value="2" min="1" max="10"></div>
+            <div><label>Agents (default: keep)</label><input id="c-agents" type="number" placeholder="${r.params?.agents ?? 6}" min="1" max="100"></div>
+          </div>
+          <button id="c-start" style="margin-top:12px; width:100%">▶ Continue run (+ generations)</button>
+        </div>`}
       </div>
       <div class="card"><h2>Event log (live)</h2><div id="events">${events || '<div class="hint">no events</div>'}</div></div>
     </div>
@@ -242,6 +253,16 @@ async function viewRun(rid) {
     const b = $("r-stop");
     if (b) b.onclick = async () => { await api("/api/runs/" + rid + "/stop", { method: "POST" }); viewRun(rid); };
     pollTimer = setTimeout(() => viewRun(rid), 2000);
+  } else {
+    const b = $("c-start");
+    if (b) b.onclick = async () => {
+      const body = { generations: +$("c-gens").value };
+      if ($("c-agents").value) body.agents = +$("c-agents").value;
+      try {
+        const r = await api("/api/runs/" + rid + "/continue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        location.hash = "#/runs/" + r.id;
+      } catch (e) { alert("continue failed: " + e.message); }
+    };
   }
 }
 </script>

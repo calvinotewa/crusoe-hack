@@ -61,3 +61,77 @@ async def test_mark_interrupted(tmp_path: Path):
     got = await store.get_run(r["id"])
     assert got["status"] == "stopped" and "interrupted" in (got["error"] or "")
     assert await store.mark_interrupted() == 0  # idempotent
+
+
+async def test_continue_lineage(tmp_path: Path):
+    """A continued run is a new run row in the same project, with lineage."""
+    store = Store(tmp_path / "t3.db")
+    p = await store.create_project("p", "g", CSV, ["a", "b", "y"])
+    r1 = await store.create_run(p["id"], {"agents": 3})
+    r2 = await store.create_run(p["id"], {"agents": 5}, continued_from=r1["id"])
+    assert r2["continued_from"] == r1["id"]
+    got = await store.get_run(r2["id"])
+    assert got["continued_from"] == r1["id"] and got["project_id"] == p["id"]
+
+
+async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
+    """Continued runs start from the previous run's best score + hypotheses."""
+    from app.services import shared_brain
+    from app.services.dashboard_store import Store as S
+    from app.services.harness_runner import HarnessRunner
+
+    seen = {}
+
+    async def fake_agent(n, goal, cols, hyp, mem, best):
+        seen[n] = (hyp, mem, best)
+        return {"name": f"a{n}", "expression": "y", "code": "def predict(row):\n    return 0.5"}
+
+    async def fake_run(code, rows, timeout=20.0):
+        return {
+            "score": 0.4,
+            "rmse": 1.5,
+            "mae": 1.0,
+            "r2": 0.0,
+            "exit_code": 0,
+            "stderr_tail": None,
+        }
+
+    async def fake_sum(goal, top, k):
+        return "s"
+
+    async def fake_gap(s):
+        return "q"
+
+    async def fake_search(q, n=5):
+        return [{"title": "t", "url": "u", "snippet": "s"}]
+
+    async def fake_hyps(goal, s, r, n, batch=10, concurrency=4, rounds_cap=10):
+        return [f"h{i}" for i in range(n)]
+
+    monkeypatch.setattr(shared_brain, "agent_experiment", fake_agent)
+    monkeypatch.setattr(shared_brain, "run_experiment", fake_run)
+    monkeypatch.setattr(shared_brain, "summarize_top", fake_sum)
+    monkeypatch.setattr(shared_brain, "search_gap_query", fake_gap)
+    monkeypatch.setattr(shared_brain, "web_search", fake_search)
+    monkeypatch.setattr(shared_brain, "generate_hypotheses", fake_hyps)
+
+    store = S(tmp_path / "t4.db")
+    p = await store.create_project("p", "g", CSV, ["a", "b", "y"])
+    params = {"agents": 2, "hypotheses": 3, "generations": 1, "top_k": 2, "sources": 2, "concurrency": 2}
+    run = await store.create_run(p["id"], params)
+    runner = HarnessRunner(
+        params,
+        "goal",
+        [{"a": 1.0, "y": 2.0}],
+        store,
+        run["id"],
+        initial_hypotheses=["inh1", "inh2", "inh3"],
+        initial_memory="inherited memory",
+        initial_best_score=0.71,
+    )
+    await runner.run()
+    hyp, mem, best = seen[1]
+    assert hyp == "inh1" and "inherited memory" in mem and best == 0.71
+    got = await store.get_run(run["id"])
+    assert got["best_score"] == 0.71  # inherited best is kept (new gens scored lower)
+    assert got["generations"][0]["hypotheses"] == ["h0", "h1", "h2"]  # fixed count kept

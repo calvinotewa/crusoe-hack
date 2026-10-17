@@ -37,21 +37,40 @@ def coerce_row(row: dict) -> dict:
 
 
 class HarnessRunner:
-    """One orchestration run against one project's dataset. Persists via `store`."""
+    """One orchestration run against one project's dataset. Persists via `store`.
 
-    def __init__(self, params: dict, goal: str, rows: list[dict], store, run_id: str):
+    Continued runs inherit state from the run they continue (see the dashboard's
+    POST /api/runs/{id}/continue): the benchmark to beat (`initial_best_score`),
+    the last generation's hypotheses, and the last summary + web learnings as
+    the starting shared memory.
+    """
+
+    def __init__(
+        self,
+        params: dict,
+        goal: str,
+        rows: list[dict],
+        store,
+        run_id: str,
+        *,
+        initial_hypotheses: list[str] | None = None,
+        initial_memory: str = "",
+        initial_best_score: float | None = None,
+    ):
         self.params = params
         self.goal = goal
         self.rows = rows
         self.store = store
         self.run_id = run_id
+        self.initial_hypotheses = initial_hypotheses or []
+        self.initial_memory = initial_memory
         self.state: dict = {
             "id": run_id,
             "params": params,
             "status": "running",
             "current_phase": "starting",
             "generation": 0,
-            "best_score": None,
+            "best_score": initial_best_score,
             "events": [],
             "generations": [],
             "started_at": datetime.now(UTC).isoformat(),
@@ -95,8 +114,8 @@ class HarnessRunner:
                 f"run {self.run_id}: {p['agents']} agents x {p['generations']} generations,"
                 f" {p['hypotheses']} hypotheses/gen, top_k={p['top_k']}",
             )
-            hypotheses: list[str] = []
-            memory = ""
+            hypotheses: list[str] = list(self.initial_hypotheses)
+            memory = self.initial_memory
             columns = sorted(set(self.rows[0]) - {"y"}) if self.rows else []
             sem = asyncio.Semaphore(p["concurrency"])
 

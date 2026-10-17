@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS runs (
     events       TEXT NOT NULL DEFAULT '[]',
     error        TEXT,
     started_at   TEXT NOT NULL,
-    finished_at  TEXT
+    finished_at  TEXT,
+    continued_from TEXT
 );
 CREATE TABLE IF NOT EXISTS run_generations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +82,10 @@ class Store:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        try:  # migrate pre-`continued_from` databases (CREATE TABLE is IF NOT EXISTS)
+            conn.execute("ALTER TABLE runs ADD COLUMN continued_from TEXT")
+        except sqlite3.OperationalError:
+            pass
         return conn
 
     # --- projects ---------------------------------------------------------
@@ -181,7 +186,7 @@ class Store:
 
     # --- runs --------------------------------------------------------------
 
-    async def create_run(self, pid: str, params: dict) -> dict:
+    async def create_run(self, pid: str, params: dict, continued_from: str | None = None) -> dict:
         import uuid as uuid_mod
 
         def op() -> dict:
@@ -191,7 +196,8 @@ class Store:
                     rid = uuid_mod.uuid4().hex[:12]
                     conn.execute(
                         "INSERT INTO runs (id, project_id, params, status, current_phase,"
-                        " generation, events, started_at) VALUES (?,?,?,?,?,?,?,?)",
+                        " generation, events, started_at, continued_from)"
+                        " VALUES (?,?,?,?,?,?,?,?,?)",
                         (
                             rid,
                             pid,
@@ -201,6 +207,7 @@ class Store:
                             0,
                             "[]",
                             now_iso(),
+                            continued_from,
                         ),
                     )
                     conn.commit()
