@@ -264,9 +264,16 @@ async def _curate(prompt: str) -> str:
 
 
 async def search_gap_query(summary: str) -> str:
-    """Step 3a: what should we search to fill the team's knowledge gaps?"""
+    """Step 3a: what should we search to fill the team's knowledge gaps?
+
+    Empty/unparseable curator answers degrade to a deterministic query built
+    from the summary's first words instead of raising."""
     content = await _curate(SEARCH_QUERY_PROMPT.format(summary=summary[:4000]))
-    return content.strip().strip('"').splitlines()[0][:300]
+    lines = [ln.strip().strip('"') for ln in content.strip().splitlines() if ln.strip()]
+    if lines:
+        return lines[0][:300]
+    words = summary.strip().split()
+    return " ".join(words[:8])[:300] or "improve the current best result"
 
 
 async def generate_hypotheses(
@@ -292,12 +299,18 @@ async def generate_hypotheses(
 
     async def ask() -> list[str]:
         async with sem:
-            text = await _curate(
-                HYPOTHESES_PROMPT.format(
-                    goal=goal, summary=summary[:4000], research=research[:4000], batch=batch
+            try:
+                text = await _curate(
+                    HYPOTHESES_PROMPT.format(
+                        goal=goal, summary=summary[:4000], research=research[:4000], batch=batch
+                    )
                 )
-            )
-            return parse_numbered_list(text)
+                return parse_numbered_list(text)
+            except Exception:
+                # one failed batch (e.g. all retries exhausted) must not kill the
+                # phase; the count is made exact by the padding below.
+                log.warning("hypothesis batch failed; continuing", exc_info=True)
+                return []
 
     for _ in range(rounds_cap):
         if len(out) >= n:
@@ -327,26 +340,40 @@ async def agent_experiment(
     best: float | None,
     stats: str = "",
 ) -> dict:
-    """Step 5: one researcher agent produces one experiment testing its hypothesis."""
+    """Step 5: one researcher agent produces one experiment testing its hypothesis.
+
+    Never raises: if the LLM call fails entirely (all retries and fallbacks
+    exhausted) or the JSON is unparseable, an error stub comes back that the
+    benchmark phase scores as 0 — one dead agent never fails the generation."""
     s = get_settings()
-    content, _ = await inference.chat(
-        [
-            {
-                "role": "user",
-                "content": AGENT_PROMPT.format(
-                    n=n,
-                    goal=goal,
-                    columns=columns,
-                    stats=stats or "(not provided)",
-                    hypothesis=hypothesis or "free choice — pick the most promising idea",
-                    best=best if best is not None else "unknown",
-                    memory=memory or "(nothing yet)",
-                ),
-            }
-        ],
-        model=s.crusoe_researcher_model,
-        temperature=0.7,
-    )
+    try:
+        content, _ = await inference.chat(
+            [
+                {
+                    "role": "user",
+                    "content": AGENT_PROMPT.format(
+                        n=n,
+                        goal=goal,
+                        columns=columns,
+                        stats=stats or "(not provided)",
+                        hypothesis=hypothesis or "free choice — pick the most promising idea",
+                        best=best if best is not None else "unknown",
+                        memory=memory or "(nothing yet)",
+                    ),
+                }
+            ],
+            model=s.crusoe_researcher_model,
+            temperature=0.7,
+        )
+    except Exception as e:
+        log.warning("agent %d LLM call failed; recording error stub", n, exc_info=True)
+        return {
+            "name": f"agent-{n}-error",
+            "code": None,
+            "rationale": f"llm error: {e}",
+            "expression": "",
+            "description": None,
+        }
     try:
         parsed = json.loads(content[content.index("{") : content.rindex("}") + 1])
     except (ValueError, IndexError):

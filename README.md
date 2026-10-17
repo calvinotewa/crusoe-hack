@@ -224,14 +224,35 @@ Experiments use the **fit/predict contract**: agents define `fit(rows)` (closed-
 least squares on a chosen basis — pure stdlib) + `predict(row, params)`, so models
 are *calibrated from the data* rather than hand-guessed. On the UCI Airfoil
 Self-Noise dataset this took the system from RMSE 17.6 dB (hand-set constants) to
-**4.27 dB, beating the 4.80 dB OLS baseline**. `inference.chat` paces requests
-(`CRUSOE_RATE_LIMIT_RPM`) and cools down + retries on 429 (the account window is
-tighter than the documented 30 RPM).
+4.27 dB, beating the 4.80 dB OLS baseline**.
 
 Everything persists in **SQLite** (`data/dashboard.db`, gitignored) with logical
 separation: `projects → runs → generations → experiments` — foreign-keyed per
 project, so results never mix across projects. Crusoe and you.com store nothing.
 Pre-projects JSON runs under `data/harness_runs/` are imported automatically on
 first boot. Runs interrupted by a restart are marked `stopped`, not lost.
+
+## Resilience to LLM errors
+
+Every model call funnels through `inference.chat`, which layers on top of the
+SDK's own retry/backoff (`CRUSOE_MAX_RETRIES`):
+
+- **Pacing**: a client RPM limiter (`CRUSOE_RATE_LIMIT_RPM`) keeps runs under the
+  account's request window (empirically tighter than the documented 30 RPM).
+- **Transient retries**: after the SDK gives up, `CRUSOE_CHAT_ATTEMPTS` extra
+  attempts with exponential backoff (`CRUSOE_CHAT_BACKOFF_SECONDS`; 429s get a
+  longer cooldown).
+- **Model fallbacks**: `CRUSOE_FALLBACK_MODELS` is an ordered chain — a model
+  that 404s/400s (or exhausts its retries) is skipped and the next one serves
+  the call. Verified live: a bogus model and a listed-but-unserveable model
+  were both skipped, and `gpt-oss-120b` served the call.
+- **Budget retry**: a reasoning model that burns `max_tokens` on thinking and
+  returns empty content is retried once with a doubled budget.
+
+Phase level (`HarnessRunner`, MVP script): a failed agent becomes a scored-0
+error stub (never a dead run); a failed hypothesis batch just loses that batch
+(the fixed count is padded); failed research/hypotheses phases **degrade** (no
+sources, carry-over hypotheses) and are logged as `DEGRADED` events — a down
+curator costs a generation its guidance, not the generation itself.
 
 Built at the Crusoe x Cerebral Valley Recursive Agents Hackathon, SF, Oct 2026.

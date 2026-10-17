@@ -96,20 +96,42 @@ async def run_generation(
 
     # --- Step 2: summarize the thinking of the top 10 experiments ---
     log.info("gen %d: curator summarizing top %d...", gen, min(args.top_k, len(experiments)))
-    summary = await shared_brain.summarize_top(args.goal, experiments, args.top_k)
+    try:
+        summary = await shared_brain.summarize_top(args.goal, experiments, args.top_k)
+    except Exception as e:
+        log.warning("summarize failed (%s); using top-experiment table", e)
+        summary = (
+            "\n".join(
+                f"- {e2.get('name')}: score {e2.get('score')} rmse {e2.get('rmse')}"
+                for e2 in experiments[: args.top_k]
+            )
+            or "(no experiments)"
+        )
 
     # --- Step 3: supplement learnings with a web search on what could improve ---
+    # Both steps degrade on failure; a down curator/search never kills the run.
     log.info("gen %d: searching the web for knowledge gaps...", gen)
-    query = await shared_brain.search_gap_query(summary)
-    sources = await shared_brain.web_search(query, args.sources)
+    try:
+        query = await shared_brain.search_gap_query(summary)
+        sources = await shared_brain.web_search(query, args.sources)
+    except Exception as e:
+        log.warning("research failed (%s); continuing without sources", e)
+        query, sources = "(research unavailable)", []
     learnings = "\n".join(f"- {s['title']} ({s['url']})" for s in sources) or "(no results)"
     log.info("gen %d: query=%r -> %d sources", gen, query, len(sources))
 
     # --- Step 4: generate N hypotheses for the next generation ---
     log.info("gen %d: curator generating %d hypotheses...", gen, args.hypotheses)
-    hypotheses = await shared_brain.generate_hypotheses(
-        args.goal, summary, learnings, args.hypotheses, concurrency=args.concurrency
-    )
+    try:
+        hypotheses = await shared_brain.generate_hypotheses(
+            args.goal, summary, learnings, args.hypotheses, concurrency=args.concurrency
+        )
+    except Exception as e:
+        # carry this generation's hypotheses over (already the fixed count)
+        log.warning("hypotheses failed (%s); carrying previous over", e)
+        hypotheses = list(hypotheses)[: args.hypotheses]
+        while len(hypotheses) < args.hypotheses:
+            hypotheses.append(f"Open question (slot {len(hypotheses) + 1})")
     log.info("gen %d: %d hypotheses ready", gen, len(hypotheses))
 
     memory = f"## Last generation's summary\n{summary}\n\n## Web learnings\n{learnings}"

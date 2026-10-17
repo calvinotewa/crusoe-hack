@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # Client-side requests-per-minute cap (Crusoe free tier: 30; 429s fail runs).
     # Set 0 to disable. Applied in inference.chat before every call.
     crusoe_rate_limit_rpm: int = 24
+    # Resilience (inference.chat): extra attempts after the SDK's own retries,
+    # with exponential backoff (RateLimitError gets a longer cooldown).
+    crusoe_chat_attempts: int = 3
+    crusoe_chat_backoff_seconds: float = 2.0
+    # Comma-separated fallback models (in order) when the requested model errors
+    # out entirely (404/400 or exhausted retries) — the call still gets served.
+    crusoe_fallback_models: str = "deepseek-ai/DeepSeek-V4-Flash,openai/gpt-oss-120b"
 
     # Modal sandboxes (also read from ~/.modal.toml if unset)
     modal_token_id: str = ""

@@ -227,19 +227,41 @@ class HarnessRunner:
                 )
 
                 # --- phase 4: web search supplements the learnings ---
+                # A transient LLM/search failure degrades (no sources this gen),
+                # it never fails the run.
                 await self._set_phase("research")
-                query = await shared_brain.search_gap_query(summary)
-                sources = await shared_brain.web_search(query, p.get("sources", 5))
+                try:
+                    query = await shared_brain.search_gap_query(summary)
+                    sources = await shared_brain.web_search(query, p.get("sources", 5))
+                except Exception as e:
+                    log.warning("research phase failed; degrading", exc_info=True)
+                    await self.log("research", f"gen {gen}: DEGRADED ({e}); no sources this gen")
+                    query, sources = "(research unavailable)", []
                 learnings = (
                     "\n".join(f"- {s['title']} ({s['url']})" for s in sources) or "(no results)"
                 )
                 await self.log("research", f"gen {gen}: query={query!r} -> {len(sources)} sources")
 
                 # --- phase 5: exactly p['hypotheses'] for the next generation ---
+                # If the curator is down, carry this generation's hypotheses over
+                # (already the fixed count) so the loop still invests a full gen.
                 await self._set_phase("hypotheses")
-                next_hypotheses = await shared_brain.generate_hypotheses(
-                    self.goal, summary, learnings, p["hypotheses"], concurrency=p["concurrency"]
-                )
+                try:
+                    next_hypotheses = await shared_brain.generate_hypotheses(
+                        self.goal, summary, learnings, p["hypotheses"], concurrency=p["concurrency"]
+                    )
+                except Exception as e:
+                    log.warning("hypotheses phase failed; degrading", exc_info=True)
+                    await self.log(
+                        "hypotheses", f"gen {gen}: DEGRADED ({e}); carrying hypotheses over"
+                    )
+                    next_hypotheses = list(gen_hypotheses)
+                    while len(next_hypotheses) < p["hypotheses"]:
+                        next_hypotheses.append(
+                            f"Open question: what else could beat the current best result?"
+                            f" (slot {len(next_hypotheses) + 1})"
+                        )
+                    next_hypotheses = next_hypotheses[: p["hypotheses"]]
                 await self.log(
                     "hypotheses",
                     f"gen {gen}: {len(next_hypotheses)} hypotheses for gen {gen + 1}",

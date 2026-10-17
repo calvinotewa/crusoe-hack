@@ -1,4 +1,17 @@
-"""Crusoe Intelligence Foundry inference. The API is OpenAI-compatible."""
+"""Crusoe Intelligence Foundry inference. The API is OpenAI-compatible.
+
+Resilience (see `chat`): the OpenAI SDK already retries 429/5xx/connection errors
+with backoff (`CRUSOE_MAX_RETRIES`). On top, `chat` adds:
+
+- client-side RPM pacing (`CRUSOE_RATE_LIMIT_RPM`),
+- extra attempts with exponential backoff for transient errors
+  (`CRUSOE_CHAT_ATTEMPTS`, `CRUSOE_CHAT_BACKOFF_SECONDS`; 429s get a longer
+  cooldown),
+- a model fallback chain (`CRUSOE_FALLBACK_MODELS`) so a model that 404s/400s
+  or exhausts its retries doesn't fail the call,
+- one budget-doubling retry when a reasoning model burns `max_tokens` on
+  thinking and returns empty content.
+"""
 
 import asyncio
 import logging
@@ -6,11 +19,29 @@ import time
 from collections import deque
 from functools import lru_cache
 
-from openai import AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    BadRequestError,
+    InternalServerError,
+    NotFoundError,
+    RateLimitError,
+)
 
 from app.config import get_settings
 
 log = logging.getLogger(__name__)
+
+# Transient: retry with backoff, then fall through to the next fallback model.
+TRANSIENT_ERRORS = (
+    RateLimitError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+)
+# The requested model is wrong for this account: skip straight to fallbacks.
+MODEL_ERRORS = (NotFoundError, BadRequestError)
 
 
 class RateLimiter:
@@ -50,6 +81,27 @@ def _limiter() -> RateLimiter:
     return RateLimiter(get_settings().crusoe_rate_limit_rpm)
 
 
+def _fallback_chain(model: str | None) -> list[str]:
+    """Requested model (or default), then the configured fallbacks, deduped."""
+    s = get_settings()
+    primary = model or s.crusoe_default_model
+    chain = [primary]
+    for m in (x.strip() for x in s.crusoe_fallback_models.split(",")):
+        if m and m not in chain:
+            chain.append(m)
+    return chain
+
+
+async def _create_once(model: str, messages: list, temperature: float, max_tokens: int, **kwargs):
+    return await get_client().chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        **kwargs,
+    )
+
+
 async def chat(
     messages: list[dict[str, str]],
     model: str | None = None,
@@ -60,33 +112,61 @@ async def chat(
     """Returns (content, latency_ms).
 
     Reasoning models spend `max_tokens` on thinking first; empty content with
-    finish_reason == "length" means the budget was too small.
+    finish_reason == "length" means the budget was too small — retried once
+    with a doubled budget before anything else.
 
-    Rate limits: the client RPM limiter paces requests, and a 429 that survives
-    the SDK's own retries (empirically the account window is tighter than the
-    documented 30 RPM) triggers an adaptive cooldown + retry so one burst can't
-    fail a whole harness run.
+    Error handling: for each model in the fallback chain, the SDK retries
+    transient failures first (max_retries); then `CRUSOE_CHAT_ATTEMPTS` extra
+    attempts with exponential backoff (RateLimitError: longer cooldown).
+    A model that 404s/400s or never succeeds raises through only after every
+    fallback has been tried — one flaky model never fails a harness run.
     """
-    attempts = 3
-    for attempt in range(attempts):
-        await _limiter().acquire()
-        started = time.perf_counter()
-        try:
-            resp = await get_client().chat.completions.create(
-                model=model or get_settings().crusoe_default_model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
+    s = get_settings()
+    attempts = max(1, s.crusoe_chat_attempts)
+    backoff = max(0.0, s.crusoe_chat_backoff_seconds)
+    chain = _fallback_chain(model)
+    started = time.perf_counter()
+    last_error: Exception | None = None
+
+    for mi, current_model in enumerate(chain):
+        budget = max_tokens
+        for attempt in range(attempts + 1):  # +1: the length-budget retry
+            await _limiter().acquire()
+            try:
+                resp = await _create_once(current_model, messages, temperature, budget, **kwargs)
+            except TRANSIENT_ERRORS as e:
+                last_error = e
+                if attempt == attempts - 1:
+                    break  # next fallback model
+                wait = 60.0 if isinstance(e, RateLimitError) else backoff * (2**attempt)
+                log.warning(
+                    "transient %s on %s (attempt %d); backing off %.0fs",
+                    type(e).__name__,
+                    current_model,
+                    attempt + 1,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            except MODEL_ERRORS as e:
+                last_error = e
+                log.warning("model error on %s: %s; trying fallbacks", current_model, e)
+                break  # next fallback model
             latency_ms = int((time.perf_counter() - started) * 1000)
-            return resp.choices[0].message.content or "", latency_ms
-        except RateLimitError:
-            if attempt == attempts - 1:
-                raise
-            log.warning("429 after SDK retries; cooling down 60s (attempt %d)", attempt + 1)
-            await asyncio.sleep(60)
-    return "", 0  # unreachable
+            content = resp.choices[0].message.content or ""
+            finish = getattr(resp.choices[0], "finish_reason", None)
+            if not content.strip() and finish == "length" and attempt < attempts:
+                log.warning(
+                    "empty content (finish=length) from %s; retrying with %d tokens",
+                    current_model,
+                    budget * 2,
+                )
+                budget *= 2
+                continue
+            if mi > 0:
+                log.info("served by fallback model %s", current_model)
+            return content, latency_ms
+    raise last_error if last_error else RuntimeError("chat exhausted all models without an error")
 
 
 async def list_models() -> list[str]:
