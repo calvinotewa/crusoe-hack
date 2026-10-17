@@ -51,7 +51,7 @@ Rules for the memory:
 
 ## Data
 
-One dataset, split three ways. There are no other datasets.
+Each run uses one dataset, split three ways. There are no other datasets in a run.
 
 | Split | Who sees it | Use |
 |---|---|---|
@@ -62,6 +62,16 @@ One dataset, split three ways. There are no other datasets.
 - Researchers never see the test split: not its data, its loss, or any score built from it.
 - The curator doesn't see it either. It verifies claims on val, because what it learns goes into memory, and researchers read memory.
 - The sandbox that `run_code` uses only gets the train and val splits.
+
+### Data sources
+
+We test on three different kinds of problem: a yes/no prediction, a time-series forecast and a numeric prediction. Together they cover a good range of problems to solve. Each dataset gets its own run and is scored on its own test split. All datasets are free to download without a login.
+
+| Problem | What it predicts | Dataset | Val loss | Why this one |
+|---|---|---|---|---|
+| Churn | Will this customer leave? (yes/no) | [OpenML 46371](https://www.openml.org/d/46371) (35k customers) | Log loss | Clear room to improve (~20%) and stable between runs |
+| Inventory | How much stock does each product need? (daily demand per product) | [Walmart M5](https://zenodo.org/records/12636070) sales (~1,000 products) | Pinball loss at 90% | Real retail data; the score measures stock levels, not just the forecast. Room to improve not measured yet |
+| Regression | At what temperature does a material become a superconductor? (a number) | [Superconductivity](https://www.openml.org/d/44148) (21k rows) | RMSE | Most room to improve (~47%); 79 features give agents real tuning work |
 
 ## Tools
 
