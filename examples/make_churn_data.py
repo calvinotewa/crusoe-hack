@@ -11,11 +11,10 @@ better churn model" is meaningful.
 """
 
 import csv
+import math
 import random
 import sys
 from pathlib import Path
-
-import math
 
 
 def sigmoid(x: float) -> float:
@@ -78,8 +77,10 @@ def main() -> None:
     bayes_brier = sum(p * (1 - p) for p in ps) / n  # DGP oracle (irreducible)
     print(f"wrote {out} ({n} rows, seed {seed})")
     print(f"base churn rate: {mean:.3f}")
-    print(f"constant-predictor Brier (RMSE^2): {const_brier:.4f} -> score {1 / (1 + math.sqrt(const_brier)):.4f}")
-    print(f"oracle (DGP) Brier floor:         {bayes_brier:.4f} -> score {1 / (1 + math.sqrt(bayes_brier)):.4f}")
+    naive_score = 1 / (1 + math.sqrt(const_brier))
+    oracle_score = 1 / (1 + math.sqrt(bayes_brier))
+    print(f"constant-predictor Brier (RMSE^2): {const_brier:.4f} -> score {naive_score:.4f}")
+    print(f"oracle (DGP) Brier floor:         {bayes_brier:.4f} -> score {oracle_score:.4f}")
 
 
 if __name__ == "__main__":

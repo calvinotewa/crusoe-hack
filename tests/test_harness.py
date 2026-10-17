@@ -187,3 +187,23 @@ def test_parse_validation_csv():
 
     # app still boots with the new router
     assert TestClient(app).get("/health").json() == {"status": "ok"}
+
+
+# --- repair_code: agents sometimes return double-escaped JSON string code ---
+
+
+def test_repair_code_unescapes_double_escaped_newlines():
+    from app.services import shared_brain
+
+    broken = "def predict(row):\\n    return 0.5"  # literal backslash-n
+    fixed = shared_brain.repair_code(broken)
+    ns: dict = {}
+    exec(fixed, ns)  # noqa: S102 - the point of the test
+    assert ns["predict"]({"a": 1}) == 0.5
+
+
+def test_repair_code_keeps_valid_code_untouched():
+    from app.services import shared_brain
+
+    good = "def predict(row):\n    return row['a'] + 1\n"
+    assert shared_brain.repair_code(good) == good

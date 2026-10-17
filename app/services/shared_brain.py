@@ -100,12 +100,30 @@ def parse_numbered_list(text: str) -> list[str]:
     return out
 
 
+def repair_code(code: str) -> str:
+    """Repair agent-generated code before exec.
+
+    Agents often return `code` as a JSON string whose newlines are double-escaped
+    (literal `\\n` backslash-n). `exec` then fails with "unexpected character after
+    line continuation character" and every experiment scores 0 — seen live when
+    34/36 experiments died. Strategy: try to compile as-is; if that fails but the
+    unescaped version compiles, use it.
+    """
+    for candidate in (code, code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')):
+        try:
+            compile(candidate, "formula.py", "exec")
+            return candidate
+        except SyntaxError:
+            continue
+    return code
+
+
 async def run_experiment(code: str, rows: list[dict], timeout: float = 20.0) -> dict:
     """Run one experiment (a predict() over the validation rows) in a subprocess.
 
     Returns {metrics..., exit_code, stderr_tail}. A crashing/slow experiment scores 0.
     """
-    program = build_program(code, rows)
+    program = build_program(repair_code(code or ""), rows)
     proc = await asyncio.create_subprocess_exec(
         "python",
         "-c",

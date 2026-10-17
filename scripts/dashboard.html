@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared Brain — orchestration dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #e6edf3; padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h1 span { color: #8b949e; font-weight: 400; font-size: 14px; }
+  .sub { color: #8b949e; margin-bottom: 20px; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; max-width: 1200px; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8b949e; margin: 0 0 12px; }
+  /* phases */
+  .phases { display: flex; gap: 8px; flex-wrap: wrap; }
+  .phase {
+    padding: 6px 12px; border-radius: 999px; font-size: 12px;
+    border: 1px solid #30363d; color: #8b949e; background: #0d1117;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .phase.active { border-color: #58a6ff; color: #79c0ff; background: #12233d; }
+  .phase.done { border-color: #238636; color: #7ee787; }
+  .phase.pulse { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .5; } }
+  /* status bits */
+  .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; }
+  .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+  .running { background: #1f2c1a; color: #7ee787; }
+  .completed { background: #12233d; color: #79c0ff; }
+  .failed, .stopped { background: #3d1d20; color: #f85149; }
+  .idle { background: #21262d; color: #8b949e; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .score { font-size: 28px; font-family: ui-monospace, Menlo, monospace; }
+  /* form */
+  label { display: block; font-size: 12px; color: #8b949e; margin: 8px 0 4px; }
+  select, input {
+    width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 8px; font-size: 13px;
+  }
+  button {
+    width: 100%; margin-top: 12px; padding: 8px; border-radius: 6px; border: 1px solid #30363d;
+    background: #238636; color: #fff; font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  button.secondary { background: #21262d; color: #e6edf3; margin-top: 8px; }
+  button:disabled { opacity: .45; cursor: default; }
+  /* events + gens */
+  #events { max-height: 220px; overflow-y: auto; font-size: 12px; }
+  #events div { padding: 2px 0; border-bottom: 1px solid #21262d; font-family: ui-monospace, Menlo, monospace; }
+  #events .ts { color: #8b949e; }
+  .gen { border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #0d1117; }
+  .gen table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .gen th, .gen td { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid #21262d; }
+  .gen th { color: #8b949e; font-weight: 500; }
+  .gen details { margin-top: 8px; }
+  .gen summary { cursor: pointer; color: #79c0ff; font-size: 13px; }
+  .gen pre { white-space: pre-wrap; font-size: 12px; color: #c9d1d9; background: #161b22; padding: 8px; border-radius: 6px; overflow-x: auto; }
+  .hyp { font-size: 12px; color: #c9d1d9; padding-left: 14px; }
+  .bar { height: 6px; border-radius: 4px; background: #21262d; overflow: hidden; margin: 6px 0; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #1f6feb, #238636); }
+  a { color: #58a6ff; text-decoration: none; }
+  #past div { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 12px; cursor: pointer; }
+  #past div:hover { color: #79c0ff; }
+  .hint { color: #8b949e; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Shared Brain <span>— orchestration dashboard</span></h1>
+<div class="sub">agents → benchmark → summarize → web research → hypotheses → next generation.
+Runs persist to <span class="mono">data/harness_runs/&lt;id&gt;.json</span>; Crusoe stores nothing.</div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>Status by phase</h2>
+      <div class="row">
+        <span id="badge" class="badge idle">idle</span>
+        <span id="gen" class="mono hint"></span>
+        <span id="runid" class="mono hint"></span>
+      </div>
+      <div class="phases" id="phases">
+        <div class="phase" data-p="agents">1 · agents</div>
+        <div class="phase" data-p="benchmark">2 · benchmark</div>
+        <div class="phase" data-p="summarize">3 · summarize</div>
+        <div class="phase" data-p="research">4 · research</div>
+        <div class="phase" data-p="hypotheses">5 · hypotheses</div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <div class="hint">best score (1/(1+rmse), higher = better)</div>
+          <div class="score mono" id="best">—</div>
+        </div>
+        <div class="hint" style="max-width:260px" id="topinfo"></div>
+      </div>
+      <div class="bar"><i id="progress" style="width:0%"></i></div>
+    </div>
+
+    <div class="card">
+      <h2>Generations (results per iteration)</h2>
+      <div id="gens"><div class="hint">No results yet — start a run.</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>New orchestration</h2>
+      <label>Dataset</label>
+      <select id="dataset">
+        <option value="churn" selected>churn — synthetic customers (400 rows)</option>
+        <option value="ab">ab — synthetic y=2a+3b+0.5ab (60 rows)</option>
+      </select>
+      <label>Agents per generation</label><input id="agents" type="number" value="6" min="1" max="100">
+      <label>Hypotheses per generation</label><input id="hypotheses" type="number" value="6" min="1" max="100">
+      <label>Generations</label><input id="generations" type="number" value="2" min="1" max="10">
+      <label>Summarize top-k</label><input id="topk" type="number" value="3" min="1" max="10">
+      <label>Concurrency (Crusoe rate limits!)</label><input id="concurrency" type="number" value="4" min="1" max="10">
+      <button id="start">▶ Start orchestration</button>
+      <button id="stop" class="secondary" disabled>■ Stop</button>
+    </div>
+
+    <div class="card">
+      <h2>Event log (live)</h2>
+      <div id="events"><div class="hint">Waiting for events…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Past runs (local JSON store)</h2>
+      <div id="past"><div class="hint">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PHASES = ["agents", "benchmark", "summarize", "research", "hypotheses"];
+const $ = (id) => document.getElementById(id);
+let seenEvents = 0;
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state");
+    const d = await r.json();
+    render(d.active);
+  } catch { /* server restarting */ }
+  setTimeout(poll, 2000);
+}
+
+function render(st) {
+  const running = st && st.status === "running";
+  $("start").disabled = running;
+  $("stop").disabled = !running;
+  if (!st) {
+    $("badge").className = "badge idle"; $("badge").textContent = "no run yet";
+    return;
+  }
+  $("badge").className = "badge " + st.status; $("badge").textContent = st.status;
+  $("runid").textContent = "run " + st.id;
+  $("gen").textContent = st.params
+    ? `${st.params.agents} agents × ${st.params.generations} gens · dataset=${st.params.dataset}` : "";
+  $("best").textContent = st.best_score != null ? Number(st.best_score).toFixed(4) : "—";
+
+  // phase chips: current gen's phase active; earlier phases of this gen done
+  const idx = PHASES.indexOf(st.current_phase);
+  document.querySelectorAll(".phase").forEach((el, i) => {
+    el.className = "phase";
+    if (st.status === "running") {
+      if (i < idx) el.className = "phase done";
+      if (i === idx) el.className = "phase active pulse";
+    } else if (st.status === "completed") el.className = "phase done";
+  });
+  // progress bar: fraction of all generations fully completed
+  const gensDone = (st.generations || []).length;
+  const frac = st.params ? gensDone / st.params.generations : 0;
+  const inGenFrac = st.status === "running" && idx >= 0 ? ((idx + 1) / PHASES.length) / st.params.generations : 0;
+  $("progress").style.width = (Math.min(1, frac + inGenFrac) * 100) + "%";
+
+  // events
+  const evs = st.events || [];
+  if (evs.length) {
+    if (evs.length < seenEvents) seenEvents = 0;  // new run
+    const box = $("events"); box.innerHTML = "";
+    evs.slice(-120).reverse().forEach((e) => {
+      const div = document.createElement("div");
+      div.innerHTML = `<span class="ts">${(e.ts || "").slice(11, 19)}</span> [g${e.gen}] ${esc(e.msg)}`;
+      box.appendChild(div);
+    });
+    seenEvents = evs.length;
+  }
+
+  // generation cards
+  const gens = st.generations || [];
+  if (gens.length) {
+    const box = $("gens"); box.innerHTML = "";
+    gens.slice().reverse().forEach((g) => {
+      const el = document.createElement("div");
+      el.className = "gen";
+      const rows = (g.experiments || []).slice(0, 5).map((e) =>
+        `<tr><td>${esc(e.name || "?")}</td><td class="mono">${fmt(e.score)}</td><td class="mono">${e.rmse != null ? e.rmse.toFixed(3) : "—"}</td></tr>`).join("");
+      el.innerHTML = `
+        <div class="row"><strong>generation ${g.gen}</strong>
+          <span class="mono" style="color:#7ee787">best ${fmt(g.best_score)}</span>
+          <span class="hint">${g.num_experiments} experiments</span></div>
+        <div class="hint">top: <span class="mono">${esc(g.top ? g.top.name : "?")}</span> — <span class="mono">${esc(g.top ? g.top.expression || "" : "")}</span></div>
+        <table><tr><th>experiment</th><th>score</th><th>rmse</th></tr>${rows}</table>
+        <details><summary>curator summary &amp; research</summary>
+          <pre>${esc((g.summary || "").slice(0, 1500))}</pre>
+          <div class="hint">research query: <span class="mono">${esc(g.query || "")}</span> → ${((g.sources || []).length)} sources</div>
+        </details>
+        <details><summary>hypotheses for gen ${g.gen + 1} (${(g.hypotheses || []).length})</summary>
+          ${(g.hypotheses || []).slice(0, 12).map((h) => `<div class="hyp">• ${esc(h)}</div>`).join("")}
+        </details>`;
+      box.appendChild(el);
+    });
+    const last = gens[gens.length - 1];
+    if (last && last.top) {
+      $("topinfo").textContent = `current top experiment: ${last.top.name} (score ${fmt(last.top.score)})`;
+    }
+  }
+  if (st.status !== "running") loadPast();
+}
+
+function fmt(x) { return x != null ? Number(x).toFixed(4) : "—"; }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+async function loadPast() {
+  try {
+    const rs = await (await fetch("/api/runs")).json();
+    const box = $("past"); box.innerHTML = "";
+    if (!rs.length) { box.innerHTML = '<div class="hint">No saved runs yet.</div>'; return; }
+    rs.forEach((r) => {
+      const el = document.createElement("div");
+      el.innerHTML = `<span>${esc(r.id)} · ${esc(r.dataset)}</span><span class="mono">${esc(r.status)} ${fmt(r.best_score)}</span>`;
+      el.onclick = async () => {
+        const d = await (await fetch("/api/runs/" + r.id)).json();
+        render(d);
+      };
+      box.appendChild(el);
+    });
+  } catch {}
+}
+
+$("start").onclick = async () => {
+  const body = {
+    dataset: $("dataset").value,
+    agents: +$("agents").value, hypotheses: +$("hypotheses").value,
+    generations: +$("generations").value, top_k: +$("topk").value,
+    concurrency: +$("concurrency").value,
+  };
+  const r = await fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) alert(((await r.json()).detail) || "failed to start");
+  seenEvents = 0;
+};
+$("stop").onclick = () => fetch("/api/stop", { method: "POST" });
+
+loadPast();
+poll();
+</script>
+</body>
+</html>

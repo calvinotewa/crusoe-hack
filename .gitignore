@@ -6,3 +6,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .neon
+
+# Dashboard run artifacts (local persistence)
+data/
+
+# run artifacts (results are in data/harness_runs/)
+shared_brain_results.json
+churn_results.json
