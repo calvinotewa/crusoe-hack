@@ -178,6 +178,7 @@ curl -s https://api.inference.crusoecloud.com/v1/models \
 
 Gotchas, all seen in practice:
 
+- **Wrong key type (this happened):** Personal Settings → Security lists **Cloud API Keys** ("programmatic access to the Crusoe *Cloud* API" — VMs, disks, S3 buckets) and **Intelligence API Keys** separately. Only an *Intelligence* key works with `api.inference.crusoecloud.com`; a Cloud key 401s there. Create it in the **Intelligence Foundry → Inference → Create API Key** (or the Security page's *Intelligence API Keys*).
 - **401 `Authentication failed`** — key truncated during copy/paste (a full key does not end mid-sequence), key from the wrong console page, or the wrong project. Re-create the key and paste the whole thing.
 - **`$` in the key** — if you shell-export, use **single quotes**; double quotes interpolate `$...` away. Writing `KEY=value` lines into `.env` is safe either way.
 - **404/429/`curl (6)`** — wrong base URL. Current one is `https://api.inference.crusoecloud.com/v1` (in `.env` as `CRUSOE_BASE_URL`); `api.crusoe.ai` and `managed-inference-api-proxy.crusoecloud.com` are outdated.
