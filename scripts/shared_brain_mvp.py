@@ -15,7 +15,7 @@ keyless DuckDuckGo). No Postgres, no bucket, no Modal: everything is in memory, 
 experiment code runs in local `python -c` subprocesses with timeouts. For untrusted
 multi-tenant runs use the API path (Modal Sandboxes).
 
-Models (README): researcher nvidia/Nemotron-3-Super-120B-A12B, curator nvidia/Nemotron-3-Ultra-550B.
+Models: researcher and curator both nvidia/NVIDIA-Nemotron-3-Super-120B-A12B.
 """
 
 import argparse

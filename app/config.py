@@ -22,14 +22,13 @@ class Settings(BaseSettings):
     # Crusoe inference
     crusoe_api_key: str = ""
     crusoe_base_url: str = "https://api.inference.crusoecloud.com/v1"
-    crusoe_default_model: str = "deepseek-ai/Deepseek-V4-Flash"
-    crusoe_judge_model: str = "openai/gpt-oss-120b"
-    # Shared Brain roles (README): researchers propose experiments, curator summarizes
-    # IDs are case-sensitive and must exist in GET /v1/models (verified live):
-    # `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` (uppercase!) and a strong general model
-    # for the curator (`nvidia/Nemotron-3-Ultra-550B` from the README is NOT deployed).
+    crusoe_default_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
+    crusoe_judge_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
+    # All roles use the Nvidia model. IDs are case-sensitive and must exist in GET /v1/models.
+    # Only `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` is confirmed served; the README's
+    # `nvidia/Nemotron-3-Ultra-550B` is not on Crusoe's serverless list.
     crusoe_researcher_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
-    crusoe_curator_model: str = "deepseek-ai/DeepSeek-V4-Pro"
+    crusoe_curator_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
     # SDK retries 429/5xx with exponential backoff (honours Retry-After)
     crusoe_max_retries: int = 6
     # Client-side requests-per-minute cap (Crusoe free tier: 30; 429s fail runs).
@@ -41,7 +40,7 @@ class Settings(BaseSettings):
     crusoe_chat_backoff_seconds: float = 2.0
     # Comma-separated fallback models (in order) when the requested model errors
     # out entirely (404/400 or exhausted retries) — the call still gets served.
-    crusoe_fallback_models: str = "deepseek-ai/DeepSeek-V4-Flash,openai/gpt-oss-120b"
+    crusoe_fallback_models: str = ""
 
     # Modal sandboxes (also read from ~/.modal.toml if unset)
     modal_token_id: str = ""

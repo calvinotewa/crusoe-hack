@@ -134,8 +134,9 @@ We track four metrics per generation:
 
 | Role | Model |
 |---|---|
-| Researcher | `nvidia/Nemotron-3-Super-120B-A12B` |
-| Curator | `nvidia/Nemotron-3-Ultra-550B` |
+| Researcher | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` |
+| Curator | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` |
+| Judge | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` |
 
 ## Tech stack
 
@@ -242,10 +243,11 @@ SDK's own retry/backoff (`CRUSOE_MAX_RETRIES`):
 - **Transient retries**: after the SDK gives up, `CRUSOE_CHAT_ATTEMPTS` extra
   attempts with exponential backoff (`CRUSOE_CHAT_BACKOFF_SECONDS`; 429s get a
   longer cooldown).
-- **Model fallbacks**: `CRUSOE_FALLBACK_MODELS` is an ordered chain — a model
-  that 404s/400s (or exhausts its retries) is skipped and the next one serves
-  the call. Verified live: a bogus model and a listed-but-unserveable model
-  were both skipped, and `gpt-oss-120b` served the call.
+- **Model fallbacks**: `CRUSOE_FALLBACK_MODELS` is an ordered chain, empty by default.
+  A model that 404s/400s (or exhausts its retries) is skipped and the next one serves
+  the call. The default is empty so a failing Nvidia model doesn't silently switch
+  to another provider. Verified live earlier with a non-Nvidia fallback: a bogus model
+  and a listed-but-unserveable model were both skipped, and `gpt-oss-120b` served the call.
 - **Budget retry**: a reasoning model that burns `max_tokens` on thinking and
   returns empty content is retried once with a doubled budget.
 
