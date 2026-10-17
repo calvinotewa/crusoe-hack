@@ -1,141 +1,4 @@
-# Shared Brain
-
-A shared memory layer for a team of ML research agents, built on Crusoe Managed Inference.
-
-Every new agent on a team usually starts from zero and pays again for the same context. In Shared Brain, short-lived researcher agents read a shared memory before they work, and a curator keeps that memory **current, lean and conflict-free**. Each generation starts fresh but smarter, and we measure the gain as validation loss.
-
-## How it works
-
-```mermaid
-flowchart TD
-    A[Set tasks + budget] --> B[Spawn researchers]
-    B --> C[Read memory]
-    C --> D[Run experiments]
-    D --> E[Report results]
-    E --> F[Curator verifies]
-    F --> G[Update memory]
-    G --> H{Generations left?}
-    H -- Yes --> B
-    H -- No --> I[Test on unseen tasks]
-    I --> J[Compare scores]
-```
-
-1. The orchestrator spawns a generation of researchers, each with a fixed lifetime.
-2. Each researcher reads memory, runs experiments to lower val loss, and reports what it learned.
-3. The curator double-checks claims, resolves conflicts and updates memory.
-4. The next generation starts fresh from the updated memory.
-5. At the end, the system is evaluated on unseen tasks using a hidden test set.
-
-## Memory
-
-The store holds four things:
-
-- **What works:** findings, with proof.
-- **What failed:** dead ends not to retry.
-- **What to try next:** open questions.
-- **Best so far:** the top config and score.
-
-Rules for the memory:
-
-- **Lean:** it has a fixed size cap.
-- **Current:** stale or unproven entries are re-tested or removed.
-- **Conflict-free:** only the curator writes to it, and contradictions are settled by an experiment.
-- **Versioned:** every change is saved.
-
-## Files
-
-| File | Access |
-|---|---|
-| `train.py` | The only file agents can edit |
-| `test.py` | Locked; agents can't see or edit it |
-
-## Data
-
-| Split | Use |
-|---|---|
-| Train | Training |
-| Val | Scoring during research |
-| Test | Hidden; used only for the final before-and-after comparison |
-
-Unseen tasks are new datasets with the same three splits.
-
-## Tools
-
-| Tool | What it does |
-|---|---|
-| `get_memory` | Read memory |
-| `upsert_memory` | Add or edit a memory |
-| `remove_memory` | Delete a memory |
-| `run_code` | Edit and run `train.py` within a fixed budget; returns val loss |
-| `web_search` | Look up papers and techniques |
-
-## Agents
-
-| Agent | Tools |
-|---|---|
-| **Researcher** (×4, each with a different focus: optimizer, architecture, regularization, data) | `get_memory`, `web_search`, `run_code` |
-| **Curator** (×1) | `get_memory`, `run_code` (to double-check), `upsert_memory`, `remove_memory` |
-
-The orchestrator is a plain Python script, not an agent.
-
-## Rules
-
-- **Reports:** a researcher's final message is its report, which the orchestrator passes to the curator.
-- **Memory writes:** only the curator writes to memory.
-- **`web_search`:**
-  - Researchers only, capped at about 2 searches per lifetime.
-  - Web ideas are hypotheses, not facts. Only results from `run_code` become memories.
-- **Budget:** enforced inside `run_code` (fixed steps or time), so no one wins by training longer.
-- **Test set:** stays locked so agents can't game the score.
-
-## Curation
-
-Each generation, the N researchers are ranked by **gain over the generation's starting best** (not raw val loss). The curator reads every report; rank decides what it does with each one.
-
-| Rank | Curator action |
-|---|---|
-| **Top M** | Re-run the claim with `run_code`; if it holds, `upsert_memory` as a fact and update best-so-far |
-| **Middle** | Keep only new ideas, as open questions |
-| **Bottom** | Record briefly as dead ends so they aren't retried |
-
-- **Losers are kept on purpose:** failed runs are the "what failed" part of memory.
-- **Noise:** gaps smaller than seed noise count as ties. Only claims that clear the noise become facts.
-- **Budget:** re-running is the curator's expensive step, so ranking decides where it's spent.
-
-## Scoring
-
-```
-gain    = (L0 − Lbest) / L0
-fitness = average gain across tasks and seeds
-```
-
-- **`L0`:** baseline loss of the starting `train.py`.
-- **`Lbest`:** best val loss reached within the budget.
-
-## Evaluation
-
-All setups use the same unseen tasks and the same budget.
-
-| Setup | What it shows |
-|---|---|
-| One-shot | A single agent, a single edit; this is the floor |
-| No memory | Every agent starts from zero |
-| Raw log | Memory without curation, which bloats and contradicts itself |
-| **Shared Brain** | Curated memory: lean and current |
-
-We track four metrics per generation:
-
-- **Quality:** fitness on the test set.
-- **Waste:** runs that repeat a known dead end.
-- **Memory size:** stays flat while the raw log grows.
-- **Cost:** tokens and time-to-first-token per agent. The memory is a shared prompt prefix, so Crusoe's KV cache reuses it.
-
-## Models (Crusoe Managed Inference)
-
-| Role | Model |
-|---|---|
-| Researcher | `nvidia/Nemotron-3-Super-120B-A12B` |
-| Curator | `nvidia/Nemotron-3-Ultra-550B` |
+# crusoe-hack
 
 ## Tech stack
 
@@ -146,15 +9,29 @@ We track four metrics per generation:
 | Object storage | [Neon Object Storage](https://neon.com/docs/storage/overview) (S3-compatible, boto3) |
 | LLM inference | [Crusoe Intelligence Foundry](https://console.crusoecloud.com/foundry) (OpenAI-compatible API) |
 | Code sandboxes | [Modal Sandboxes](https://modal.com/docs/guide/sandboxes) |
+| Web search (harness) | [you.com](https://you.com) API, for the between-generations research step |
 
-## Setup
+## Orchestration harness (`POST /sessions`)
 
-```bash
-scripts/setup.sh                    # installs tooling, signs in to Modal/Neon/Crusoe, generates a verified .env
-uv run python scripts/check_env.py  # re-verify .env anytime (--skip-sandbox for a fast check)
-uv run fastapi dev app/main.py
-```
+A generational loop that tries to **beat a benchmark with formulae** rather than prompting
+alone. Per generation (see `app/services/orchestrator.py`):
 
-Requires Node.js (for the Neon CLI) and access to the team Neon project `patient-art-99467040` (ask the owner to invite your Neon account).
+1. **Ingest** (session creation): validation CSV (needs a `y` column) + optional seed
+   formulae go to the bucket + Postgres; seeds become generation 0, the baseline to beat.
+2. **runSubAgent × N**: worker agents on Crusoe propose alternative formulae
+   (`predict(row) -> float`), stored with lineage via `store_formulae()`.
+3. **Benchmark**: every formula runs against the validation CSV inside Modal sandboxes
+   (`block_network=True`, hard timeout); RMSE / MAE / R2 / score land in `benchmarks`.
+4. **Summarise**: the best 3 agents' *session thinking* (rationale) is summarised and
+   consolidated by a judge model.
+5. **Research**: "if the agents knew X…" — a gap query synthesised from the summary, then
+   `research_num_sources` (default 20) web sources fetched via you.com and stored.
+6. **Rewrite prompt**: the next generation's system prompt = general human task +
+   consolidated inherited learnings + research learnings; `GET /sessions/{id}/findings`
+   is the RAG read tool workers can call between runs.
+7. **Iterate**: `POST /sessions/{id}/iterate {"generations": n}` runs more generations
+   with the rewritten prompt; each generation tries to beat `best_score`.
 
-Built at the Crusoe x Cerebral Valley Recursive Agents Hackathon, SF, Oct 2026.
+API: `POST /sessions`, `GET /sessions[/{id}]`, `POST /sessions/{id}/iterate`,
+`GET /sessions/{id}/findings?q=…`. Tables: `harness_sessions`, `formulae`, `benchmarks`,
+`research_sources` (migration `b1a2c3d4e5f6`).

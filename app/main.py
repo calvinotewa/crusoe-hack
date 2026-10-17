@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI
 
-from app.api.routes import datasets, health, playground, runs
+from app.api.routes import datasets, health, playground, runs, sessions
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,3 +16,4 @@ app.include_router(health.router)
 app.include_router(datasets.router)
 app.include_router(runs.router)
 app.include_router(playground.router)
+app.include_router(sessions.router)

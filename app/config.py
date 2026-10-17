@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     modal_app_name: str = "crusoe-hack-sandboxes"
     sandbox_timeout_seconds: int = 120
 
+    # Orchestration harness (app/services/orchestrator.py)
+    # Worker count per generation; the brief says 100, mind Crusoe's 30 RPM on free accounts.
+    harness_num_agents: int = 6
+    # Fraction of a generation that earns a slot in the inherited-learnings prompt (top 10%).
+    harness_top_fraction: float = 0.1
+    # Generations per POST /sessions; more via POST /sessions/{id}/iterate.
+    harness_max_generations: int = 3
+
+    # you.com web search API (console -> API keys); used to find new sources between generations.
+    you_api_key: str = ""
+    you_api_base: str = "https://api.ydc-api.io"
+    research_num_sources: int = 20
+
     @property
     def migration_database_url(self) -> str:
         return self.database_url_unpooled or self.database_url

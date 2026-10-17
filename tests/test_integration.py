@@ -74,3 +74,106 @@ async def test_dataset_to_run(monkeypatch):
 
         assert (await client.get(f"/runs/{run_id}/failures")).json() == []
     await engine.dispose()
+
+
+async def test_harness_session_loop(monkeypatch):
+    """Steps 1-7 end-to-end: CSV in, worker formulae, sandboxed benchmarks, summary,
+    research, prompt rewrite, next generation."""
+    import json
+
+    from app.db import engine
+    from app.main import app
+    from app.services import inference, research, sandbox, storage
+
+    bucket: dict[str, bytes] = {}
+
+    async def put_bytes(key, data, content_type="application/octet-stream"):
+        bucket[key] = data
+        return key
+
+    async def get_bytes(key):
+        return bucket[key]
+
+    async def chat(messages, model=None, temperature=0.2, max_tokens=4096, **kw):
+        if any("worker agent" in m.get("content", "") for m in messages if isinstance(m, dict)):
+            return json.dumps(
+                {
+                    "name": "sum",
+                    "expression": "y = a + b",
+                    "description": "add features",
+                    "code": "def predict(row):\n    return row['a'] + row['b']",
+                    "rationale": "y looked additive",
+                }
+            ), 5
+        return "SUMMARY: agents assumed additivity; tried interactions; best was linear.", 5
+
+    async def run_python(code, timeout=None):
+        # run the actual benchmark wrapper inline (it's pure python)
+        import io
+        import math
+        import statistics
+
+        ns: dict = {"json": json, "math": math, "statistics": statistics}
+        try:
+            from contextlib import redirect_stdout
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                exec(code, ns)  # noqa: S102 - executing our own benchmarker wrapper
+            return SandboxResult(stdout=out.getvalue(), stderr="", exit_code=0)
+        except Exception as e:
+            return SandboxResult(stdout="", stderr=str(e), exit_code=1)
+
+    async def fetch_sources(query, n):
+        return [
+            {"title": f"src: {query}", "url": "https://example.com/x", "snippet": "use ridge"}
+        ] * n
+
+    monkeypatch.setattr(storage, "put_bytes", put_bytes)
+    monkeypatch.setattr(storage, "get_bytes", get_bytes)
+    monkeypatch.setattr(inference, "chat", chat)
+    monkeypatch.setattr(sandbox, "run_python", run_python)
+    monkeypatch.setattr(research, "fetch_sources", fetch_sources)
+
+    csv_text = "a,b,y\n1,2,3\n2,3,5\n3,4,7\n"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.post(
+            "/sessions",
+            json={
+                "name": f"harness-{os.urandom(4).hex()}",
+                "goal": "predict y from a and b",
+                "validation_csv": csv_text,
+                "seed_formulae": [
+                    {
+                        "name": "mean",
+                        "expression": "y = 5",
+                        "code": "def predict(row):\n    return 5.0",
+                    }
+                ],
+            },
+        )
+        assert r.status_code == 202, r.text
+        session_id = r.json()["id"]
+
+        detail = (await client.get(f"/sessions/{session_id}")).json()
+        assert detail["status"] == "completed", detail
+        assert detail["num_validation_rows"] == 3
+        assert len(detail["sources"]) > 0  # step 5 stored sources
+        assert detail["system_prompt"], "step 6 rewrote the prompt"
+        assert detail["best_score"] and detail["best_score"] >= 0.9  # y = a + b is exact
+        assert any(f["source"] == "seed" for f in detail["formulae"])  # step 1 seeds
+        assert any(f["source"] == "agent" for f in detail["formulae"])  # step 2 workers
+
+        # step 6 tool: RAG read over findings
+        findings = (
+            await client.get(f"/sessions/{session_id}/findings", params={"q": "ridge"})
+        ).json()
+        assert isinstance(findings, list)
+
+        # step 7: iterate another generation with the rewritten prompt
+        r = await client.post(f"/sessions/{session_id}/iterate", json={"generations": 1})
+        assert r.status_code == 202, r.text
+        detail = (await client.get(f"/sessions/{session_id}")).json()
+        assert detail["generation"] >= 1
+    await engine.dispose()

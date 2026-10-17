@@ -1,0 +1,134 @@
+"""Unit tests for the orchestration harness (steps 1-7).
+
+Tests never call Crusoe, Modal or the bucket: inference, sandboxes and search are
+monkeypatched at the `app.services` module boundary, per AGENTS.md. Postgres-backed
+behaviour (sessions, benchmarks) is covered by tests/test_integration.py.
+"""
+
+import json
+
+from app.services import benchmarker, research, subagent
+from app.services.formulae import FORMULA_SCHEMA
+
+
+def fake_formula_json(name="f"):
+    return {
+        "name": name,
+        "expression": "y ~ a",
+        "description": "test",
+        "code": "def predict(row):\n    return 42.0",
+        "rationale": "guessed a constant",
+    }
+
+
+# --- step 2: runSubAgent ---
+
+
+async def test_run_sub_agent_passes_system_prompt_and_tools(monkeypatch):
+    calls = []
+
+    async def fake_chat(messages, model=None, temperature=0.2, max_tokens=4096, **kw):
+        calls.append(messages)
+        return json.dumps(fake_formula_json()), 5
+
+    monkeypatch.setattr(subagent.inference, "chat", fake_chat)
+    out = await subagent.run_json(
+        "make a formula", shape="json", system_prompt="sys", tools=["storeFormulae"]
+    )
+    assert out["name"] == "f"
+    assert calls[0][0]["role"] == "system" and calls[0][0]["content"] == "sys"
+    assert "storeFormulae" in calls[0][1]["content"]
+
+
+async def test_run_json_repairs_once(monkeypatch):
+    responses = ["definitely not json", json.dumps({"name": "fixed"})]
+
+    async def fake_chat(messages, **kw):
+        return responses.pop(0), 1
+
+    monkeypatch.setattr(subagent.inference, "chat", fake_chat)
+    assert (await subagent.run_json("x", shape="json"))["name"] == "fixed"
+
+
+async def test_run_json_gives_up_after_repair(monkeypatch):
+    async def fake_chat(messages, **kw):
+        return "still not json", 1
+
+    monkeypatch.setattr(subagent.inference, "chat", fake_chat)
+    assert await subagent.run_json("x", shape="json") == {}
+
+
+def test_worker_prompt_contract():
+    p = subagent.worker_prompt("predict y", ["a", "b"], 3)
+    assert FORMULA_SCHEMA.splitlines()[0] in p
+    assert "predict y" in p and "'a'" in p
+
+
+# --- step 3: the benchmark program ---
+
+
+def _run_program(code: str, rows: list[dict]) -> dict:
+    """Exec a generated benchmark program and parse its JSON output, like the sandbox would."""
+    import contextlib
+    import io
+
+    program = benchmarker.build_program(code, rows)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(program, {})  # noqa: S102 - executing the harness's own benchmark wrapper
+    return json.loads(out.getvalue().strip().splitlines()[-1])
+
+
+def test_build_program_exact_formula_scores_perfectly():
+    rows = [
+        {"a": 1.0, "b": 2.0, "y": 3.0},
+        {"a": 2.0, "b": 3.0, "y": 5.0},
+    ]
+    metrics = _run_program("def predict(row):\n    return row['a'] + row['b']", rows)
+    assert metrics["n"] == 2 and metrics["skipped"] == 0
+    assert abs(metrics["rmse"]) < 1e-9 and metrics["score"] > 0.99
+
+
+def test_build_program_skips_crashing_rows():
+    rows = [{"a": 1.0, "y": 2.0}, {"a": 1.0, "y": 2.0}, {"a": 1.0, "y": 2.0}]
+    metrics = _run_program("def predict(row):\n    return 1 / 0", rows)
+    assert metrics["n"] == 0 and metrics["skipped"] == 3 and metrics["score"] == 0.0
+
+
+def test_coerce_row():
+    row = benchmarker._coerce({"a": " 1.5 ", "b": "", "c": "x", "y": "3"})
+    assert row == {"a": 1.5, "b": None, "c": "x", "y": 3}
+
+
+# --- step 5: research source fetching ---
+
+
+async def test_fetch_sources_stub_without_key(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setattr(research, "get_settings", lambda: Settings(you_api_key=""))
+    sources = await research.fetch_sources("kernel tricks", 3)
+    assert len(sources) == 3 and "kernel tricks" in sources[0]["title"]
+
+
+# --- step 1: input contract ---
+
+
+def test_parse_validation_csv():
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from app.api.routes import sessions as routes_sessions
+    from app.main import app
+
+    rows = routes_sessions._parse_validation_csv("a,b,y\n1,2,3\n2,3,5\n3,4,7\n")
+    assert len(rows) == 3 and "y" in rows[0]
+
+    try:
+        routes_sessions._parse_validation_csv("a,b\n1,2\n")
+        raise AssertionError("missing y column should 422")
+    except HTTPException as e:
+        assert e.status_code == 422
+
+    # app still boots with the new router
+    assert TestClient(app).get("/health").json() == {"status": "ok"}

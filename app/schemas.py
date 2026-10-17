@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models import RunStatus
+from app.models import HarnessStatus, RunStatus
 
 
 class Task(BaseModel):
@@ -102,3 +102,107 @@ class SandboxResult(BaseModel):
     stdout: str
     stderr: str
     exit_code: int
+
+
+# --- Orchestration harness ---
+
+
+class FormulaIn(BaseModel):
+    """A seed formula (step 1). `code` must define `predict(row: dict) -> float`."""
+
+    name: str
+    expression: str
+    description: str | None = None
+    code: str | None = None
+
+
+class HarnessSessionCreate(BaseModel):
+    """Step 1: ingest a validation CSV (must have a `y` column) and optional seed formulae."""
+
+    name: str
+    goal: str
+    validation_csv: str
+    seed_formulae: list[FormulaIn] = Field(default_factory=list)
+
+
+class FormulaOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    generation: int
+    name: str
+    description: str | None
+    expression: str
+    code: str | None
+    source: str
+    parent_id: uuid.UUID | None
+    rationale: str | None
+    created_at: datetime
+
+
+class BenchmarkOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    formula_id: uuid.UUID
+    generation: int
+    rmse: float | None
+    mae: float | None
+    r2: float | None
+    score: float | None
+    num_rows: int
+    sandbox_exit_code: int | None
+    error_tail: str | None
+    created_at: datetime
+
+
+class ResearchSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    generation: int
+    query: str
+    title: str
+    url: str
+    snippet: str | None
+    created_at: datetime
+
+
+class HarnessSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    goal: str
+    system_prompt: str | None
+    status: HarnessStatus
+    generation: int
+    num_validation_rows: int
+    best_score: float | None
+    summary: str | None
+    research_query: str | None
+    error: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class HarnessSessionDetail(HarnessSessionOut):
+    formulae: list[FormulaOut]
+    benchmarks: list[BenchmarkOut]
+    sources: list[ResearchSourceOut]
+
+
+class HarnessIterate(BaseModel):
+    """Step 7 again: run more generations with the current (rewritten) system prompt."""
+
+    generations: int = 1
+
+
+class Finding(BaseModel):
+    """One row of the RAG read tool (knowledge.read_findings)."""
+
+    kind: Literal["source", "formula", "session"]
+    title: str
+    text: str
+    score: float
+    url: str | None = None
