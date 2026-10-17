@@ -25,8 +25,11 @@ class Settings(BaseSettings):
     crusoe_default_model: str = "deepseek-ai/Deepseek-V4-Flash"
     crusoe_judge_model: str = "openai/gpt-oss-120b"
     # Shared Brain roles (README): researchers propose experiments, curator summarizes
-    crusoe_researcher_model: str = "nvidia/Nemotron-3-Super-120B-A12B"
-    crusoe_curator_model: str = "nvidia/Nemotron-3-Ultra-550B"
+    # IDs are case-sensitive and must exist in GET /v1/models (verified live):
+    # `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` (uppercase!) and a strong general model
+    # for the curator (`nvidia/Nemotron-3-Ultra-550B` from the README is NOT deployed).
+    crusoe_researcher_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"
+    crusoe_curator_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     # SDK retries 429/5xx with exponential backoff (honours Retry-After)
     crusoe_max_retries: int = 6
 
