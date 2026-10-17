@@ -390,6 +390,45 @@ async def generate_hypotheses(
     return out[:n]
 
 
+def _parse_agent_json(content: str) -> dict | None:
+    """Parse the agent's JSON object, tolerating truncation.
+
+    Reasoning models sometimes run out of tokens mid-JSON (no closing brace).
+    First try the normal outermost-braces slice; then try closing the
+    truncation: cut at the last complete value and close the open strings and
+    braces. Returns None if nothing parses."""
+    try:
+        start, end = content.index("{"), content.rindex("}")
+        parsed = json.loads(content[start : end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except (ValueError, IndexError):
+        pass
+    start = content.find("{")
+    if start == -1:
+        return None
+    frag = content[start:].rstrip()
+    if not frag:
+        return None
+    # try progressively: as-is, close an open string, then close open braces
+    n_open = frag.count("{") - frag.count("}")
+    in_string = frag.count('"') % 2 == 1
+    candidates = [frag]
+    if in_string:
+        candidates.append(frag + '"')
+        if n_open >= 1:
+            candidates.append(frag + '"' + "}" * n_open)
+    elif n_open >= 1:
+        candidates.append(frag + "}" * n_open)
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, dict):
+                return parsed
+        except ValueError:
+            continue
+    return None
+
+
 async def agent_experiment(
     n: int,
     goal: str,
@@ -401,28 +440,26 @@ async def agent_experiment(
 ) -> dict:
     """Step 5: one researcher agent produces one experiment testing its hypothesis.
 
-    Never raises: if the LLM call fails entirely (all retries and fallbacks
-    exhausted) or the JSON is unparseable, an error stub comes back that the
-    benchmark phase scores as 0 — one dead agent never fails the generation."""
+    Never raises. LLM errors degrade to a scored-0 error stub; unparseable JSON
+    gets ONE repair round (a repair prompt with a bigger budget — truncated
+    completions from reasoning models are the common failure) before falling
+    back to the stub. One dead agent never fails the generation."""
     s = get_settings()
+    prompt = AGENT_PROMPT.format(
+        n=n,
+        goal=goal,
+        columns=columns,
+        stats=stats or "(not provided)",
+        hypothesis=hypothesis or "free choice — pick the most promising idea",
+        best=best if best is not None else "unknown",
+        memory=memory or "(nothing yet)",
+    )
     try:
         content, _ = await inference.chat(
-            [
-                {
-                    "role": "user",
-                    "content": AGENT_PROMPT.format(
-                        n=n,
-                        goal=goal,
-                        columns=columns,
-                        stats=stats or "(not provided)",
-                        hypothesis=hypothesis or "free choice — pick the most promising idea",
-                        best=best if best is not None else "unknown",
-                        memory=memory or "(nothing yet)",
-                    ),
-                }
-            ],
+            [{"role": "user", "content": prompt}],
             model=s.crusoe_researcher_model,
             temperature=0.7,
+            max_tokens=8192,  # reasoning models think first; don't truncate the JSON
         )
     except Exception as e:
         log.warning("agent %d LLM call failed; recording error stub", n, exc_info=True)
@@ -433,9 +470,38 @@ async def agent_experiment(
             "expression": "",
             "description": None,
         }
-    try:
-        parsed = json.loads(content[content.index("{") : content.rindex("}") + 1])
-    except (ValueError, IndexError):
+    parsed = _parse_agent_json(content)
+    needs_repair = parsed is None or not parsed.get("code")
+    if needs_repair and content.strip():
+        # one repair round: show the broken output, ask for ONLY the JSON
+        log.info("agent %d: unparseable/incomplete JSON (len %d); repairing", n, len(content))
+        try:
+            content, _ = await inference.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": content[:6000],
+                    },
+                    {
+                        "role": "user",
+                        "content": "That reply was truncated or not valid JSON. Reply again with "
+                        "ONLY the complete JSON object (name, expression, description, code, "
+                        "rationale). Keep the code concise so it fits.",
+                    },
+                ],
+                model=s.crusoe_researcher_model,
+                temperature=0.2,
+                max_tokens=8192,
+            )
+            parsed = _parse_agent_json(content)
+        except Exception:
+            log.warning("agent %d: repair round failed", n, exc_info=True)
+    if parsed is None or not parsed.get("code"):
+        # still unparseable or unusable after repair: a scored-0 stub
         return {
             "name": f"agent-{n}-unparsed",
             "code": None,

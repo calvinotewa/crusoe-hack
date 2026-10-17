@@ -111,9 +111,9 @@ async def chat(
 ) -> tuple[str, int]:
     """Returns (content, latency_ms).
 
-    Reasoning models spend `max_tokens` on thinking first; empty content with
-    finish_reason == "length" means the budget was too small — retried once
-    with a doubled budget before anything else.
+    Reasoning models spend `max_tokens` on thinking first; finish_reason ==
+    "length" means the answer was truncated (or empty) — retried with a doubled
+    budget, keeping the longest partial as a last-resort answer.
 
     Error handling: for each model in the fallback chain, the SDK retries
     transient failures first (max_retries); then `CRUSOE_CHAT_ATTEMPTS` extra
@@ -127,6 +127,7 @@ async def chat(
     chain = _fallback_chain(model)
     started = time.perf_counter()
     last_error: Exception | None = None
+    partial = ""  # longest truncated-but-nonempty answer seen
 
     for mi, current_model in enumerate(chain):
         budget = max_tokens
@@ -155,17 +156,24 @@ async def chat(
             latency_ms = int((time.perf_counter() - started) * 1000)
             content = resp.choices[0].message.content or ""
             finish = getattr(resp.choices[0], "finish_reason", None)
-            if not content.strip() and finish == "length" and attempt < attempts:
+            if finish == "length" and attempt < attempts:
+                # Truncated (reasoning models burn budget on thinking first):
+                # harness prompts need complete output, so retry with a doubled
+                # budget — keeping the longest partial as a last-resort answer.
                 log.warning(
-                    "empty content (finish=length) from %s; retrying with %d tokens",
+                    "truncated content (finish=length) from %s; retrying with %d tokens",
                     current_model,
                     budget * 2,
                 )
+                if len(content) > len(partial):
+                    partial = content
                 budget *= 2
                 continue
             if mi > 0:
                 log.info("served by fallback model %s", current_model)
-            return content, latency_ms
+            return (content, latency_ms) if len(content) >= len(partial) else (partial, latency_ms)
+    if partial:
+        return partial, int((time.perf_counter() - started) * 1000)  # truncated, but usable
     raise last_error if last_error else RuntimeError("chat exhausted all models without an error")
 
 

@@ -83,6 +83,38 @@ async def test_chat_doubles_budget_on_empty_length_finish(monkeypatch):
     assert budgets[1] == 2048  # doubled once
 
 
+async def test_chat_retries_truncated_nonempty_length(monkeypatch):
+    """Truncated-but-nonempty output (reasoning model runs out mid-JSON) retries
+    with a doubled budget; the longer answer wins."""
+    monkeypatch.setattr(inference, "get_settings", lambda: FAST)
+    monkeypatch.setattr(inference, "_limiter", lambda: RateLimiter(0))
+    budgets = []
+
+    async def truncating(model, messages, temperature, max_tokens, **kw):
+        budgets.append(max_tokens)
+        if len(budgets) == 1:
+            return SimpleNamespace(choices=[_msg('{"name": "half', finish="length")])
+        return SimpleNamespace(choices=[_msg('{"name": "complete model"}')])
+
+    monkeypatch.setattr(inference, "_create_once", truncating)
+    content, _ = await inference.chat([{"role": "user", "content": "hi"}], max_tokens=1024)
+    assert "complete model" in content
+    assert budgets[1] == 2048
+
+
+async def test_chat_returns_longest_partial_if_always_truncated(monkeypatch):
+    monkeypatch.setattr(inference, "get_settings", lambda: FAST)
+    monkeypatch.setattr(inference, "_limiter", lambda: RateLimiter(0))
+
+    async def always_truncated(model, messages, temperature, max_tokens, **kw):
+        text = '{"name": "' + "x" * 100 + " truncated"
+        return SimpleNamespace(choices=[_msg(text, finish="length")])
+
+    monkeypatch.setattr(inference, "_create_once", always_truncated)
+    content, _ = await inference.chat([{"role": "user", "content": "hi"}])
+    assert content.startswith('{"name"')  # usable partial, not an exception
+
+
 async def test_chat_raises_only_after_every_fallback(monkeypatch):
     monkeypatch.setattr(inference, "get_settings", lambda: FAST)
     monkeypatch.setattr(inference, "_limiter", lambda: RateLimiter(0))
@@ -102,6 +134,61 @@ async def test_chat_raises_only_after_every_fallback(monkeypatch):
 
 
 # --- agent failures become stubs, not exceptions -----------------------------
+
+
+def test_parse_agent_json_recovers_truncated():
+    """A completion that runs out of tokens mid-string still parses via
+    brace-closing — the common reasoning-model truncation failure."""
+    truncated = (
+        '{"name": "CubicVelocity", "expression": "y = b0 + b1*log(f)", '
+        '"description": "cubic in alpha", "code": "def fit(rows):\\n    return [1.0]'
+    )  # no closing quotes/braces
+    parsed = shared_brain._parse_agent_json("\nthinking...\n" + truncated)
+    assert parsed is not None and parsed["name"] == "CubicVelocity"
+    assert parsed["code"].startswith("def fit")
+
+
+def test_parse_agent_json_returns_none_on_garbage():
+    assert shared_brain._parse_agent_json("no json at all here") is None
+    assert shared_brain._parse_agent_json("") is None
+
+
+async def test_agent_experiment_repairs_unparseable_json(monkeypatch):
+    """Unparseable/incomplete JSON gets one repair round before the stub."""
+    calls = []
+
+    async def flaky_chat(messages, model=None, temperature=0.2, max_tokens=4096, **kw):
+        calls.append(len(messages))
+        if len(calls) == 1:
+            return "Sure! Here's the experiment you asked for — great question.", 1  # no JSON
+        # the repair call: assistant turn carries the broken output
+        assert len(messages) == 3 and messages[1]["role"] == "assistant"
+        return (
+            '{"name": "Fixed", "code": "def fit(rows):\\n    return [1]", '
+            '"expression": "y", "description": "d", "rationale": "r"}',
+            1,
+        )
+
+    monkeypatch.setattr(shared_brain.inference, "chat", flaky_chat)
+    exp = await shared_brain.agent_experiment(1, "goal", ["a"], "hyp", "", None)
+    assert exp["name"] == "Fixed" and exp["code"]
+    assert len(calls) == 2  # original + repair
+
+
+async def test_agent_experiment_repairs_codeless_recovery(monkeypatch):
+    """Truncation that brace-closes into a dict WITHOUT `code` still repairs."""
+    calls = []
+
+    async def once_then_dead(messages, model=None, temperature=0.2, max_tokens=4096, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            return '{"name": "half', 1  # brace-closes fine, but no code
+        raise AssertionError("repair round missing")
+
+    monkeypatch.setattr(shared_brain.inference, "chat", once_then_dead)
+    exp = await shared_brain.agent_experiment(1, "goal", ["a"], "hyp", "", None)
+    assert len(calls) == 2  # original + repair (the repair raising -> stub)
+    assert "unparsed" in exp["name"]
 
 
 async def test_agent_experiment_returns_error_stub_on_llm_failure(monkeypatch):
