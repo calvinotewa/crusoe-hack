@@ -1,0 +1,9 @@
+{
+  "name": "starter-mixed",
+  "description": "One task per grader type",
+  "tasks": [
+    {"id": "capital-fi", "prompt": "What is the capital of Finland? Answer with one word.", "grader": "exact", "expected": "Helsinki"},
+    {"id": "fizzbuzz", "prompt": "Write a Python function fizzbuzz(n) that returns 'Fizz' for multiples of 3, 'Buzz' for 5, 'FizzBuzz' for both, else str(n). Return only code.", "grader": "code", "test": "assert fizzbuzz(3) == 'Fizz'\nassert fizzbuzz(10) == 'Buzz'\nassert fizzbuzz(15) == 'FizzBuzz'\nassert fizzbuzz(7) == '7'"},
+    {"id": "explain-rag", "prompt": "Explain retrieval-augmented generation to a product manager in 3 sentences.", "grader": "judge", "rubric": "Accurate, non-technical, exactly 3 sentences."}
+  ]
+}
