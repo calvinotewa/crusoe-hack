@@ -7,12 +7,10 @@ API (or, if no key is set, a stub source pointing at the query so the loop stays
 
 import logging
 
-import httpx
-
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import HarnessSession, ResearchSource
-from app.services import subagent
+from app.services import shared_brain, subagent
 
 log = logging.getLogger(__name__)
 
@@ -46,29 +44,15 @@ def _stub_sources(query: str, n: int) -> list[dict]:
 
 
 async def fetch_sources(query: str, n: int) -> list[dict]:
-    """Search you.com (YDC API) for sources on `query`."""
+    """Search you.com (Web Search API) for sources on `query`.
+
+    Falls back to keyless DuckDuckGo when YOU_API_KEY is unset, and to stub entries
+    if both fail — the loop stays runnable in every case.
+    """
     s = get_settings()
     if not s.you_api_key:
-        log.warning("YOU_API_KEY not set; returning stub research sources")
-        return _stub_sources(query, n)
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{s.you_api_base.rstrip('/')}/search",
-            params={"q": query, "num_results": n, "safesearch": "Off"},
-            headers={"X-API-Key": s.you_api_key},
-        )
-        resp.raise_for_status()
-        hits = resp.json().get("hits", [])
-    return [
-        {
-            "title": h.get("title", "")[:500],
-            "url": h.get("url", "")[:500],
-            "snippet": (h.get("snippets") or [""])[0]
-            if h.get("snippets")
-            else h.get("description"),
-        }
-        for h in hits[:n]
-    ]
+        log.warning("YOU_API_KEY not set; using keyless search (DuckDuckGo)")
+    return await shared_brain.web_search(query, n) or _stub_sources(query, n)
 
 
 async def store_sources(session_id, generation: int, query: str, sources: list[dict]) -> list:

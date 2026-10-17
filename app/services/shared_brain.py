@@ -157,26 +157,35 @@ async def web_search(query: str, n: int = 5) -> list[dict]:
     keyless HTML endpoint. Returns [{title, url, snippet}]; empty list on failure."""
     s = get_settings()
     if s.you_api_key:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{s.you_api_base.rstrip('/')}/search",
-                params={"q": query, "num_results": n, "safesearch": "Off"},
-                headers={"X-API-Key": s.you_api_key},
-            )
-            resp.raise_for_status()
-            return [
-                {
-                    "title": h.get("title", ""),
-                    "url": h.get("url", ""),
-                    "snippet": (h.get("snippets") or [""])[0],
-                }
-                for h in resp.json().get("hits", [])[:n]
-            ]
+        try:
+            return await _youcom_search(s.you_api_key, s.you_api_base, query, n)
+        except Exception:
+            log.warning("you.com search failed for %r; falling back to DDG", query, exc_info=True)
     try:
         return await _ddg_search(query, n)
     except Exception:
         log.warning("web search failed for %r", query, exc_info=True)
         return []
+
+
+async def _youcom_search(api_key: str, base: str, query: str, n: int) -> list[dict]:
+    """you.com Web Search API: POST {base}/v1/search (see you.com/docs/guides/search)."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base.rstrip('/')}/v1/search",
+            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            json={"query": query, "count": n},
+        )
+        resp.raise_for_status()
+        web = resp.json().get("results", {}).get("web", [])
+    return [
+        {
+            "title": h.get("title", ""),
+            "url": h.get("url", ""),
+            "snippet": (h.get("snippets") or [h.get("description") or ""])[0],
+        }
+        for h in web[:n]
+    ]
 
 
 async def _ddg_search(query: str, n: int) -> list[dict]:

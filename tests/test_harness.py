@@ -115,16 +115,40 @@ async def test_generate_hypotheses_exact_count(monkeypatch):
 
 
 async def test_web_search_fallback_is_safe(monkeypatch):
-    """No YOU_API_KEY and a failing web fetch -> empty list, not an exception."""
-    import app.services.inference  # noqa: F401  (ensure app import works)
+    """Failing you.com AND failing DDG -> empty list, not an exception."""
     from app.services import shared_brain
+
+    async def failing_youcom(api_key, base, query, n):
+        raise RuntimeError("you.com down")
 
     async def failing_ddg(query, n):
         raise RuntimeError("network unavailable")
 
+    monkeypatch.setattr(shared_brain, "_youcom_search", failing_youcom)
     monkeypatch.setattr(shared_brain, "_ddg_search", failing_ddg)
     monkeypatch.delenv("YOU_API_KEY", raising=False)
     assert await shared_brain.web_search("anything") == []
+
+
+async def test_web_search_uses_youcom_when_configured(monkeypatch):
+    from app.config import Settings
+    from app.services import shared_brain
+
+    calls = {}
+
+    async def fake_youcom(api_key, base, query, n):
+        calls.update(api_key=api_key, base=base, query=query, n=n)
+        return [{"title": f"t {query}", "url": "u", "snippet": "s"}] * n
+
+    monkeypatch.setattr(
+        shared_brain,
+        "get_settings",
+        lambda: Settings(you_api_key="k", you_api_base="https://x.io"),
+    )
+    monkeypatch.setattr(shared_brain, "_youcom_search", fake_youcom)
+    out = await shared_brain.web_search("q1", 7)
+    assert len(out) == 7 and out[0]["title"] == "t q1"
+    assert calls["n"] == 7 and calls["base"] == "https://x.io"
 
 
 async def test_agent_experiment_parses_json(monkeypatch):
@@ -179,10 +203,16 @@ def test_coerce_row():
 # --- step 5: research source fetching ---
 
 
-async def test_fetch_sources_stub_without_key(monkeypatch):
+async def test_fetch_sources_stub_when_search_empty(monkeypatch):
+    """Keyless search that yields nothing -> stub sources, so the loop stays runnable."""
     from app.config import Settings
+    from app.services import shared_brain
+
+    async def empty_search(query, n):
+        return []
 
     monkeypatch.setattr(research, "get_settings", lambda: Settings(you_api_key=""))
+    monkeypatch.setattr(shared_brain, "web_search", empty_search)
     sources = await research.fetch_sources("kernel tricks", 3)
     assert len(sources) == 3 and "kernel tricks" in sources[0]["title"]
 

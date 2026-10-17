@@ -52,9 +52,10 @@ class Settings(BaseSettings):
     # Generations per POST /sessions; more via POST /sessions/{id}/iterate.
     harness_max_generations: int = 3
 
-    # you.com web search API (console -> API keys); used to find new sources between generations.
+    # you.com Web Search API (https://you.com/platform -> API keys), used to find
+    # new sources between generations. Current endpoint: POST {you_api_base}/v1/search.
     you_api_key: str = ""
-    you_api_base: str = "https://api.ydc-api.io"
+    you_api_base: str = "https://ydc-index.io"
     research_num_sources: int = 20
 
     @property
