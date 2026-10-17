@@ -84,13 +84,34 @@ def test_parse_numbered_list():
 async def test_generate_hypotheses_batches(monkeypatch):
     from app.services import shared_brain
 
+    calls = []
+
     async def fake_curate(prompt):
-        assert "hypotheses" in prompt.lower() or "hypothesis" in prompt.lower()
+        calls.append(prompt)
         return "1. alpha idea\n2. beta idea"
 
     monkeypatch.setattr(shared_brain, "_curate", fake_curate)
     out = await shared_brain.generate_hypotheses("goal", "summary", "research", 4, batch=2)
-    assert len(out) == 4 and out[0] == "alpha idea"
+    assert out[0] == "alpha idea" and out[1] == "beta idea"
+    assert len(out) == 4  # exactly n, padded if the curator repeats itself
+    assert len(set(out)) == 4  # unique
+
+
+async def test_generate_hypotheses_exact_count(monkeypatch):
+    """The count is FIXED: exactly n, every call, de-duplicated."""
+    from app.services import shared_brain
+
+    counter = {"i": 0}
+
+    async def fake_curate(prompt):
+        counter["i"] += 1
+        return f"1. hypothesis {counter['i']}a\n2. hypothesis {counter['i']}b"
+
+    monkeypatch.setattr(shared_brain, "_curate", fake_curate)
+    for n in (1, 5, 20):
+        out = await shared_brain.generate_hypotheses("goal", "sum", "res", n, batch=2)
+        assert len(out) == n, f"n={n}: {len(out)}"
+        assert len(set(out)) == n
 
 
 async def test_web_search_fallback_is_safe(monkeypatch):

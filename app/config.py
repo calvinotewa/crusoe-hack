@@ -46,8 +46,9 @@ class Settings(BaseSettings):
     harness_top_k: int = 10
     # Fraction of a generation that earns a slot in the inherited-learnings prompt.
     harness_top_fraction: float = 0.1
-    # Hypotheses the curator generates per generation (spec: 100).
-    harness_num_hypotheses: int = 10
+    # Hypotheses the curator generates per generation. FIXED count: the same
+    # every generation, set once per run (dashboard/API can override per run).
+    harness_num_hypotheses: int = 20
     # Generations per POST /sessions; more via POST /sessions/{id}/iterate.
     harness_max_generations: int = 3
 

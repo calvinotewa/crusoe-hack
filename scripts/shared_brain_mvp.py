@@ -125,7 +125,9 @@ async def main() -> None:
     p.add_argument("--generations", type=int, default=2, help="passes of steps 1-5 (default 2)")
     p.add_argument("--agents", type=int, default=100, help="agents per generation (spec: 100)")
     p.add_argument("--top-k", type=int, default=10, help="experiments to summarize (spec: 10)")
-    p.add_argument("--hypotheses", type=int, default=100, help="hypotheses per gen (spec: 100)")
+    p.add_argument(
+        "--hypotheses", type=int, default=20, help="hypotheses per gen (FIXED count, default 20)"
+    )  # noqa: E501
     p.add_argument(
         "--sources", type=int, default=5, help="web sources to fetch (spec step: search)"
     )

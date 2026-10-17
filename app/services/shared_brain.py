@@ -16,6 +16,7 @@ for a local MVP on trusted hardware; production uses Modal Sandboxes (sandbox.ru
 import asyncio
 import json
 import logging
+import math
 import re
 
 import httpx
@@ -226,24 +227,51 @@ async def search_gap_query(summary: str) -> str:
 
 
 async def generate_hypotheses(
-    goal: str, summary: str, research: str, n: int, batch: int = 10, concurrency: int = 4
+    goal: str,
+    summary: str,
+    research: str,
+    n: int,
+    batch: int = 10,
+    concurrency: int = 4,
+    rounds_cap: int = 10,
 ) -> list[str]:
-    """Step 4: generate `n` hypotheses in batches of `batch` (curator model)."""
-    sem = asyncio.Semaphore(concurrency)
+    """Generate EXACTLY `n` unique hypotheses (fixed count, same every generation).
 
-    async def one(i: int) -> list[str]:
+    The count is a run-level variable (default 20, see HARNESS_NUM_HYPOTHESES) —
+    not something the curator gets to decide. Batches of `batch` in parallel,
+    de-duplicated, keeps asking until the count is reached (capped at
+    `rounds_cap` rounds); pads with explicit open-question slots if the curator
+    stalls, so the count is always exact.
+    """
+    sem = asyncio.Semaphore(concurrency)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    async def ask() -> list[str]:
         async with sem:
             text = await _curate(
                 HYPOTHESES_PROMPT.format(
                     goal=goal, summary=summary[:4000], research=research[:4000], batch=batch
                 )
             )
-        return parse_numbered_list(text)
+            return parse_numbered_list(text)
 
-    batches = [one(i) for i in range(0, n, batch)]
-    out: list[str] = []
-    for lst in await asyncio.gather(*batches):
-        out.extend(lst)
+    for _ in range(rounds_cap):
+        if len(out) >= n:
+            break
+        need = n - len(out)
+        num_asks = max(1, math.ceil(need / batch))
+        for lst in await asyncio.gather(*[ask() for _ in range(num_asks)]):
+            for h in lst:
+                if h not in seen:
+                    seen.add(h)
+                    out.append(h)
+    if len(out) < n:  # keep the count exact even if the curator repeats itself
+        while len(out) < n:
+            slot = len(out) + 1
+            out.append(
+                f"Open question: what else could beat the current best result? (slot {slot})"
+            )
     return out[:n]
 
 

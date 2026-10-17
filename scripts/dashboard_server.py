@@ -36,9 +36,12 @@ active: HarnessRunner | None = None
 
 
 class StartBody(BaseModel):
+    """Start a run. `hypotheses` is a fixed count: every generation of the run
+    generates exactly that many (default 20)."""
+
     dataset: str = Field(default="churn", pattern="^(churn|ab)$")
     agents: int = Field(default=6, ge=1, le=100)
-    hypotheses: int = Field(default=6, ge=1, le=100)
+    hypotheses: int = Field(default=20, ge=1, le=100)
     generations: int = Field(default=2, ge=1, le=10)
     top_k: int = Field(default=3, ge=1, le=10)
     sources: int = Field(default=5, ge=0, le=20)
