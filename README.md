@@ -157,6 +157,32 @@ uv run fastapi dev app/main.py
 
 Requires Node.js (for the Neon CLI) and access to the team Neon project `patient-art-99467040` (ask the owner to invite your Neon account).
 
+## Crusoe API key
+
+The only credential the MVP needs. Create it in **Console → Intelligence Foundry → API keys** (not Admin → Organization Details — that page shows the org ID, not keys). Keys are shown **once**, are project-scoped, and may contain `$`.
+
+Put it in `.env` (gitignored — never commit it):
+
+```bash
+echo 'CRUSOE_API_KEY=<paste full key here>' >> .env
+```
+
+Verify before a run — a 401 here means the loop will fail at its first inference call:
+
+```bash
+curl -s https://api.inference.crusoecloud.com/v1/models \
+  -H "Authorization: Bearer $(grep ^CRUSOE_API_KEY= .env | cut -d= -f2-)"
+# expect: {"object":"list","data":[{"id":"..."},...]}, NOT {"errors":["Authentication failed"]}
+# or: uv run python scripts/check_env.py
+```
+
+Gotchas, all seen in practice:
+
+- **401 `Authentication failed`** — key truncated during copy/paste (a full key does not end mid-sequence), key from the wrong console page, or the wrong project. Re-create the key and paste the whole thing.
+- **`$` in the key** — if you shell-export, use **single quotes**; double quotes interpolate `$...` away. Writing `KEY=value` lines into `.env` is safe either way.
+- **404/429/`curl (6)`** — wrong base URL. Current one is `https://api.inference.crusoecloud.com/v1` (in `.env` as `CRUSOE_BASE_URL`); `api.crusoe.ai` and `managed-inference-api-proxy.crusoecloud.com` are outdated.
+- **Model IDs are case-sensitive** — copy them from the `/v1/models` response or `GET /playground/models`, not from memory.
+
 ## MVP (no infra): run the loop with just a Crusoe key
 
 ```bash
