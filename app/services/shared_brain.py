@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
 
 import httpx
@@ -150,6 +151,24 @@ async def run_experiment(code: str, rows: list[dict], timeout: float = 20.0) -> 
         return metrics
     except (ValueError, IndexError):
         return {"exit_code": 0, "stderr_tail": "unparseable output", "score": 0.0}
+
+
+async def verify_experiment(
+    code: str, rows: list[dict], resamples: int = 3, seed: int = 0
+) -> list[float]:
+    """Re-run an experiment on bootstrap resamples of the validation rows.
+
+    Formulas are deterministic, so the curator's replicate check varies the data, not the seed.
+    A crashed or timed-out resample counts as an infinite loss.
+    """
+    rng = random.Random(seed)
+    losses = []
+    for _ in range(resamples):
+        sample = [rng.choice(rows) for _ in rows]
+        res = await run_experiment(code, sample)
+        rmse = res.get("rmse")
+        losses.append(float(rmse) if rmse is not None and math.isfinite(rmse) else math.inf)
+    return losses
 
 
 async def web_search(query: str, n: int = 5) -> list[dict]:

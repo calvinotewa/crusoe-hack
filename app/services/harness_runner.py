@@ -1,6 +1,9 @@
 """The Shared Brain loop as an inspectable orchestration (dashboard path).
 
-Per generation: agents -> benchmark -> summarize -> research -> hypotheses.
+Per generation: agents -> benchmark -> curate -> research -> hypotheses.
+The curate phase is the curator gate (`app/services/curation.py`): it ranks experiments,
+verifies the top claim on resamples, and only a claim that replicates moves the best score.
+Shared memory is the curated store, not a free-form summary.
 Instrumented for the dashboard: phase events, per-generation results, and
 persistence into the SQLite store (`app/services/dashboard_store.py`) with
 logical separation: every run belongs to a project; every generation and
@@ -14,11 +17,11 @@ import logging
 import random
 from datetime import UTC, datetime
 
-from app.services import shared_brain
+from app.services import curation, shared_brain
 
 log = logging.getLogger(__name__)
 
-PHASES = ["agents", "benchmark", "summarize", "research", "hypotheses"]
+PHASES = ["agents", "benchmark", "curate", "research", "hypotheses"]
 MAX_EVENTS = 300
 
 
@@ -64,6 +67,7 @@ class HarnessRunner:
         self.run_id = run_id
         self.initial_hypotheses = initial_hypotheses or []
         self.initial_memory = initial_memory
+        self.memory = curation.Memory()
         self.state: dict = {
             "id": run_id,
             "params": params,
@@ -115,13 +119,15 @@ class HarnessRunner:
                 f" {p['hypotheses']} hypotheses/gen, top_k={p['top_k']}",
             )
             hypotheses: list[str] = list(self.initial_hypotheses)
-            memory = self.initial_memory
             columns = sorted(set(self.rows[0]) - {"y"}) if self.rows else []
             sem = asyncio.Semaphore(p["concurrency"])
 
             for gen in range(1, p["generations"] + 1):
                 self.state["generation"] = gen
-                gen_hypotheses, gen_memory = hypotheses, memory
+                gen_hypotheses = hypotheses
+                gen_memory = "\n\n".join(
+                    x for x in (self.initial_memory, self.memory.render()) if x
+                )
 
                 # --- phase 1: agents produce experiments (testing hypotheses) ---
                 await self._set_phase("agents")
@@ -175,15 +181,30 @@ class HarnessRunner:
                     )
                 scored.sort(key=lambda e: e.get("score") or 0.0, reverse=True)
                 gen_best = scored[0].get("score") if scored else None
-                known = [x for x in (self.state["best_score"], gen_best) if x is not None]
-                self.state["best_score"] = max(known) if known else None
 
-                # --- phase 3: curator summarizes the thinking of the top-k ---
-                await self._set_phase("summarize")
-                top = scored[: p["top_k"]]
-                summary = await shared_brain.summarize_top(self.goal, top, p["top_k"])
+                # --- phase 3: curator gate; only a replicated claim moves the best ---
+                await self._set_phase("curate")
+                incumbent = self.state["best_score"]
+                incumbent_loss = (1.0 / incumbent - 1.0) if incumbent else None
+                promoted = await curation.curate(
+                    self.memory,
+                    scored,
+                    gen,
+                    incumbent_loss,
+                    lambda code: shared_brain.verify_experiment(code, self.rows),
+                )
+                if promoted is not None:
+                    self.state["best_score"] = 1.0 / (1.0 + promoted.loss)
+                summary = self.memory.render() or "(no verified learnings yet)"
                 await self.log(
-                    "summarize", f"gen {gen}: curator summarized top {len(top)} (best {gen_best})"
+                    "curate",
+                    f"gen {gen}: best {self.state['best_score']}, "
+                    + (
+                        f"promoted {promoted.experiment.get('name')}"
+                        f" (resampled rmse {promoted.loss:.4f})"
+                        if promoted
+                        else "no claim replicated"
+                    ),
                 )
 
                 # --- phase 4: web search supplements the learnings ---
@@ -232,7 +253,6 @@ class HarnessRunner:
                 )
                 await self._persist()
                 hypotheses = next_hypotheses
-                memory = f"## Last generation's summary\n{summary}\n\n## Web learnings\n{learnings}"
 
             self.state["status"] = "completed"
             await self.log("done", f"run finished, best score {self.state['best_score']}")

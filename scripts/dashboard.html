@@ -59,7 +59,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const PHASES = ["agents", "benchmark", "summarize", "research", "hypotheses"];
+const PHASES = ["agents", "benchmark", "curate", "research", "hypotheses"];
 let pollTimer = null;
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -96,7 +96,7 @@ async function viewProjects() {
   $("app").innerHTML = `
   <h1>Shared Brain <span>— projects</span></h1>
   <div class="sub">Each project: goal + validation CSV. Runs execute the 5-step loop
-  (agents → benchmark → summarize → you.com research → hypotheses) and persist
+  (agents → benchmark → curate → you.com research → hypotheses) and persist
   separately per project in SQLite (<span class="mono">data/dashboard.db</span>): projects → runs → generations → experiments.</div>
   <div class="grid">
     <div class="card">
