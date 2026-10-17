@@ -1,118 +1,201 @@
 #!/usr/bin/env python
-"""Shared Brain dashboard: HTML UI + JSON API over the instrumented harness runner.
+"""Shared Brain dashboard: projects + orchestration runs, HTML UI + JSON API.
 
-    uv run python scripts/dashboard_server.py [--port 8877]
+    uv run python scripts/dashboard_server.py [--port 8877]     # http://127.0.0.1:8877
 
-Then open http://127.0.0.1:8877. The page shows orchestration status by phase,
-streams progress events, shows per-generation results as they land, and has a
-Start button that triggers the full 5-step loop automatically. Every run is
-persisted to data/harness_runs/<id>.json (Crusoe itself stores nothing).
-
-Only needs CRUSOE_API_KEY in .env; no Postgres/bucket/Modal.
+Projects (name, goal, uploaded validation CSV) are created in the UI; runs execute
+the 5-step loop against a project's dataset. Everything persists in SQLite
+(data/dashboard.db) with logical separation: projects -> runs -> generations ->
+experiments. Crusoe and you.com store nothing themselves.
 """
 
 import argparse
 import asyncio
+import csv
+import io
 import json
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import uvicorn  # noqa: E402
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from app.services.harness_runner import HarnessRunner, load_dataset  # noqa: E402
+from app.services.dashboard_store import Store  # noqa: E402
+from app.services.harness_runner import HarnessRunner, coerce_row  # noqa: E402
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "harness_runs"
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
+DB_PATH = DATA_DIR / "dashboard.db"
 HTML_PATH = Path(__file__).resolve().parent / "dashboard.html"
+LEGACY_DIR = DATA_DIR / "harness_runs"
 
-app = FastAPI(title="Shared Brain dashboard")
-
-# One active run at a time (MVP: in-process asyncio task, JSON persistence).
-active: HarnessRunner | None = None
+store = Store(DB_PATH)
+runners: dict[str, HarnessRunner] = {}
 
 
-class StartBody(BaseModel):
-    """Start a run. `hypotheses` is a fixed count: every generation of the run
-    generates exactly that many (default 20)."""
+@asynccontextmanager
+async def lifespan(_app):
+    n = await store.mark_interrupted()
+    if n:
+        print(f"[dashboard] marked {n} interrupted run(s) as stopped")
+    yield
 
-    dataset: str = Field(default="churn", pattern="^(churn|ab)$")
+
+app = FastAPI(title="Shared Brain dashboard", lifespan=lifespan)
+
+
+class RunStart(BaseModel):
+    """Start a run. `hypotheses` is a fixed count: every generation generates exactly n."""
+
     agents: int = Field(default=6, ge=1, le=100)
     hypotheses: int = Field(default=20, ge=1, le=100)
     generations: int = Field(default=2, ge=1, le=10)
     top_k: int = Field(default=3, ge=1, le=10)
-    sources: int = Field(default=5, ge=0, le=20)
+    sources: int = Field(default=10, ge=0, le=20)
     concurrency: int = Field(default=4, ge=1, le=10)
-    goal: str | None = None
 
 
-@app.get("/")
+# --- html ---------------------------------------------------------------
+
+
+@app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     return FileResponse(HTML_PATH, media_type="text/html")
 
 
-@app.get("/api/state")
-async def state() -> dict:
-    if active is None:
-        return {"active": None}
-    return {"active": active.state}
+# --- projects -----------------------------------------------------------
 
 
-@app.post("/api/start", status_code=202)
-async def start(body: StartBody) -> dict:
-    global active
-    if active is not None and active.state["status"] == "running":
-        raise HTTPException(409, "a run is already active; stop it first")
-    params = body.model_dump()
-    _, rows = load_dataset(params["dataset"])
+@app.get("/api/projects")
+async def list_projects() -> list[dict]:
+    return await store.list_projects()
+
+
+@app.post("/api/projects", status_code=201)
+async def create_project(
+    name: str = Form(...),
+    goal: str = Form(...),
+    dataset: UploadFile | None = File(None),  # noqa: B008 (FastAPI idiom)
+    csv_text: str | None = Form(None),
+) -> dict:
+    """Create a project. Upload a CSV file, or paste CSV text; needs a `y` column."""
+    content = ""
+    if dataset is not None:
+        raw = await dataset.read()
+        content = raw.decode("utf-8", errors="replace")
+    elif csv_text:
+        content = csv_text
+    if not content.strip():
+        raise HTTPException(422, "upload a CSV file or paste CSV text")
+    rows = list(csv.DictReader(io.StringIO(content)))
     if not rows or "y" not in rows[0]:
-        raise HTTPException(500, f"dataset {params['dataset']} has no rows/y column")
-    active = HarnessRunner(params, rows, DATA_DIR)
-    asyncio.get_running_loop().create_task(active.run())
-    return {"id": active.state["id"], "params": params}
+        raise HTTPException(422, "CSV needs a header row and a `y` column")
+    columns = [c for c in rows[0] if c and c.strip()]
+    project = await store.create_project(name.strip(), goal.strip(), content, columns)
+    return {k: v for k, v in project.items() if k != "dataset_csv"}
 
 
-@app.post("/api/stop")
-async def stop() -> dict:
-    if active is None or active.state["status"] != "running":
+@app.get("/api/projects/{pid}")
+async def get_project(pid: str) -> dict:
+    p = await store.get_project(pid)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return p
+
+
+@app.delete("/api/projects/{pid}")
+async def delete_project(pid: str) -> dict:
+    if not await store.delete_project(pid):
+        raise HTTPException(404, "project not found")
+    for rid in [r for r, rn in runners.items() if rn.params.get("project_id") == pid]:
+        runners.pop(rid, None)
+    return {"deleted": pid}
+
+
+# --- runs ---------------------------------------------------------------
+
+
+@app.post("/api/projects/{pid}/runs", status_code=202)
+async def start_run(pid: str, body: RunStart) -> dict:
+    project = await store.get_project(pid)
+    if not project:
+        raise HTTPException(404, "project not found")
+    params = body.model_dump() | {"project_id": pid}
+    run = await store.create_run(pid, params)
+    rows = [coerce_row(r) for r in csv.DictReader(io.StringIO(project["dataset_csv"]))]
+    runner = HarnessRunner(params, project["goal"], rows, store, run["id"])
+    runners[run["id"]] = runner
+    asyncio.get_running_loop().create_task(runner.run())
+    return run
+
+
+@app.get("/api/runs/{rid}")
+async def get_run(rid: str) -> dict:
+    run = await store.get_run(rid)
+    if not run:
+        raise HTTPException(404, "run not found")
+    return run
+
+
+@app.post("/api/runs/{rid}/stop")
+async def stop_run(rid: str) -> dict:
+    runner = runners.get(rid)
+    if not runner or runner.state["status"] != "running":
         raise HTTPException(409, "no active run")
-    # The runner records the cancellation in its finally-block and persists.
     for task in asyncio.all_tasks():
         if task.get_coro().__qualname__.startswith("HarnessRunner.run"):
             task.cancel()
     return {"status": "cancelling"}
 
 
-@app.get("/api/runs")
-async def runs() -> list[dict]:
-    out = []
-    for f in sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+def import_legacy_runs() -> int:
+    """One-time import of pre-projects JSON runs (data/harness_runs) into the DB.
+    Runs are grouped into one project per dataset name."""
+    if not LEGACY_DIR.exists():
+        return 0
+    if asyncio.run(store.list_projects()):
+        return 0  # already migrated
+    count = 0
+    project_by_ds: dict[str, str] = {}
+    for f in sorted(LEGACY_DIR.glob("*.json")):
         try:
             d = json.loads(f.read_text())
-            out.append(
-                {
-                    "id": d.get("id"),
-                    "dataset": d.get("params", {}).get("dataset"),
-                    "status": d.get("status"),
-                    "best_score": d.get("best_score"),
-                    "generations": len(d.get("generations", [])),
-                    "started_at": d.get("started_at"),
-                }
-            )
-        except (ValueError, OSError):
+        except ValueError:
             continue
-    return out
-
-
-@app.get("/api/runs/{run_id}")
-async def get_run(run_id: str) -> dict:
-    path = (DATA_DIR / f"{run_id}.json").resolve()
-    if DATA_DIR.resolve() not in path.parents or not path.is_file():
-        raise HTTPException(404, "run not found")
-    return json.loads(path.read_text())
+        ds = d.get("params", {}).get("dataset", "imported")
+        csv_path = ROOT / "examples" / ("churn_synthetic.csv" if ds == "churn" else "")
+        if not csv_path.is_file():
+            continue
+        if ds not in project_by_ds:
+            csv_text = csv_path.read_text()
+            rows = list(csv.DictReader(io.StringIO(csv_text)))
+            proj = asyncio.run(
+                store.create_project(
+                    f"{ds} (imported)", d.get("goal") or "(imported run)", csv_text, list(rows[0])
+                )
+            )
+            project_by_ds[ds] = proj["id"]
+        run = asyncio.run(store.create_run(project_by_ds[ds], d.get("params", {})))
+        asyncio.run(
+            store.update_run(
+                run["id"],
+                status=d.get("status", "completed"),
+                current_phase="done",
+                generation=d.get("generation", 0),
+                best_score=d.get("best_score"),
+                events=d.get("events", []),
+                finished_at=d.get("finished_at"),
+            )
+        )
+        for g in d.get("generations", []):
+            asyncio.run(store.add_generation(run["id"], g, g.get("experiments", [])))
+        count += 1
+    return count
 
 
 def main() -> None:
@@ -120,6 +203,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8877)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
+    imported = import_legacy_runs()
+    if imported:
+        print(f"[dashboard] imported {imported} legacy run(s) into the project store")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

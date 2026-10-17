@@ -204,19 +204,26 @@ for a cheap smoke run (6 agents, 10 hypotheses, 1 generation). Results land in
 researchers (`CRUSOE_RESEARCHER_MODEL`) propose experiments, the curator
 (`CRUSOE_CURATOR_MODEL`) summarizes and hypothesizes.
 
-## Dashboard (HTML): watch and trigger the orchestration
+## Dashboard (HTML): projects + orchestration
 
 ```bash
 uv run python scripts/dashboard_server.py          # http://127.0.0.1:8877
 ```
 
-Shows status **by phase** (1 agents → 2 benchmark → 3 summarize → 4 research →
-5 hypotheses), a live event log, a progress bar, and a card per generation with
-its results (top experiment, score table, curator summary, research query,
-next-gen hypotheses). The **Start** button triggers the full loop automatically
-(dataset, agents, hypotheses, generations, concurrency configurable in the
-form); results appear per iteration as they land, and **past runs are listed
-from the local JSON store** (`data/harness_runs/<id>.json` — persisted after
-every phase, so runs survive restarts; Crusoe itself stores nothing).
+**Projects** are the unit of organization: name + goal + uploaded validation CSV
+(needs a `y` column; file upload or paste). The UI lists your projects, and each
+project page starts runs (agents, fixed hypothesis count, generations, top-k,
+concurrency) and shows every past run with its per-iteration results.
+
+Runs execute the **by-phase** loop (1 agents → 2 benchmark → 3 summarize → 4
+you.com research → 5 hypotheses) with a live event log, progress bar, and a card
+per generation: top experiment, score table, curator summary, research sources,
+next-gen hypotheses.
+
+Everything persists in **SQLite** (`data/dashboard.db`, gitignored) with logical
+separation: `projects → runs → generations → experiments` — foreign-keyed per
+project, so results never mix across projects. Crusoe and you.com store nothing.
+Pre-projects JSON runs under `data/harness_runs/` are imported automatically on
+first boot. Runs interrupted by a restart are marked `stopped`, not lost.
 
 Built at the Crusoe x Cerebral Valley Recursive Agents Hackathon, SF, Oct 2026.
