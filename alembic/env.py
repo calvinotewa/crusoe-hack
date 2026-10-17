@@ -5,13 +5,16 @@ from sqlalchemy.engine import Connection
 
 from alembic import context
 from app import models  # noqa: F401  (registers tables on Base.metadata)
-from app.db import Base, engine
+from app.config import get_settings
+from app.db import Base, make_engine
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+# Migrations must use the direct (non-pooler) host.
+engine = make_engine(get_settings().migration_database_url)
 
 
 def run_migrations_offline() -> None:

@@ -7,8 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
-    # Neon Postgres
+    # Neon Postgres. `neon env pull` writes a pooled DATABASE_URL (app) and a direct
+    # DATABASE_URL_UNPOOLED (migrations).
     database_url: str = "postgresql://localhost/crusoe_hack"
+    database_url_unpooled: str = ""
 
     # Neon Object Storage (S3 compatible)
     aws_access_key_id: str = ""
@@ -32,19 +34,26 @@ class Settings(BaseSettings):
     sandbox_timeout_seconds: int = 120
 
     @property
-    def async_database_url(self) -> str:
-        """Neon hands out `postgresql://...?sslmode=require&channel_binding=require`.
+    def migration_database_url(self) -> str:
+        return self.database_url_unpooled or self.database_url
 
-        asyncpg doesn't understand those query params, so strip them and pass SSL via
-        connect_args instead (see db.py).
-        """
-        parts = urlsplit(self.database_url)
-        scheme = "postgresql+asyncpg"
-        return urlunsplit((scheme, parts.netloc, parts.path, "", ""))
 
-    @property
-    def database_requires_ssl(self) -> bool:
-        return "neon.tech" in self.database_url or "sslmode=require" in self.database_url
+def asyncpg_engine_args(url: str) -> tuple[str, dict]:
+    """Turn a Neon connection string into (SQLAlchemy URL, connect_args) for asyncpg.
+
+    Neon URLs carry `?sslmode=require&channel_binding=require`, which asyncpg rejects, so
+    strip the query and pass SSL via connect_args. The `-pooler` host is PgBouncer in
+    transaction mode, where asyncpg's prepared-statement caches must be off.
+    """
+    parts = urlsplit(url)
+    connect_args: dict = {}
+    if "neon.tech" in parts.netloc or "sslmode=require" in parts.query:
+        connect_args["ssl"] = "require"
+    query = ""
+    if "-pooler" in parts.netloc:
+        connect_args["statement_cache_size"] = 0
+        query = "prepared_statement_cache_size=0"
+    return urlunsplit(("postgresql+asyncpg", parts.netloc, parts.path, query, "")), connect_args
 
 
 @lru_cache

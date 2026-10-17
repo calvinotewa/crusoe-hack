@@ -7,16 +7,18 @@ description: Conventions, layout and commands for this repo (FastAPI + Crusoe + 
 
 ## Commands
 ```bash
-uv sync && cp .env.example .env
-uv run alembic upgrade head                     # direct (non-pooler) Neon URL, on a branch
+scripts/setup.sh                                # first run / new machine (idempotent; see below)
+uv run alembic upgrade head                     # uses DATABASE_URL_UNPOOLED (direct host)
 uv run fastapi dev app/main.py                  # /docs; smoke: /health/deps, /playground/*
 uv run ruff check --fix . && uv run ruff format . && uv run pytest     # required before finishing
 uv run alembic revision --autogenerate -m "…"   # after editing models; review the file
 RUN_INTEGRATION=1 DATABASE_URL=… uv run pytest  # real (branch) Postgres, faked providers
 ```
 
+`scripts/setup.sh` installs uv and the Neon CLI (npm `neon` v8+), runs `uv sync` (Modal CLI included), signs in with `modal token new`, `neon login` and a Crusoe key prompt (validated against `/v1/models`). It links the team Neon project (`patient-art-99467040`, "crusoe-hack", aws-us-east-2; its default branch is `production`), checks out a per-developer branch `dev-<name>`, and creates the bucket. Then it generates `.env` from `.env.example` with `scripts/dotenv_tool.py`, which keeps existing values: Neon vars come from `neon env pull`, the Modal token is copied from `~/.modal.toml`, and the Crusoe key from the prompt. Finally it migrates, and fails unless `scripts/check_env.py` passes. That check covers all keys present, pooled and direct DB, a bucket round trip, a Crusoe chat and a Modal sandbox. When adding a setting, also add it to `REQUIRED` in `check_env.py` if the app can't run without it. Don't run it unattended: it opens browsers. Agents should assume `.env` exists, or ask the user to run it.
+
 ## Layout
-- `app/config.py`: `Settings` (pydantic-settings, reads `.env` then `.env.local`). Every new setting also goes in `.env.example`, with a comment saying where the value comes from.
+- `app/config.py`: `Settings` (pydantic-settings, reads `.env` then `.env.local`) and `asyncpg_engine_args()` (Neon URL → asyncpg; handles sslmode and the `-pooler` statement cache). Every new setting also goes in `.env.example`, with a comment saying where the value comes from.
 - `app/db.py`: async engine, `SessionLocal`, `Base`, `SessionDep` (use in routes; in background work, `async with SessionLocal()`).
 - `app/models.py`: `Dataset`, `Run`, `RunResult`. `app/schemas.py`: Pydantic I/O models plus `Task` (one eval item).
 - `app/api/routes/`: thin routers (`health`, `datasets`, `runs`, `playground`), registered in `main.py`.
@@ -47,8 +49,7 @@ RUN_INTEGRATION=1 DATABASE_URL=… uv run pytest  # real (branch) Postgres, fake
 ## Wiring gotchas
 | Symptom | Fix |
 | --- | --- |
-| `invalid connection option "sslmode"` | Bypassed `Settings.async_database_url`. Use `app.db.engine` |
-| `prepared statement … already exists` | `-pooler` host. Use direct, or disable asyncpg statement caches |
+| `invalid connection option "sslmode"` / `prepared statement … already exists` | Engine built without `app.db.make_engine()` / `asyncpg_engine_args()` |
 | S3 signature/DNS errors, `NoSuchBucket` | Use `storage._client()`. Buckets are per Neon branch |
 | Crusoe 401/404/429, empty output | See `crusoe-inference` (key quoting, ID casing, limits, `max_tokens`) |
 | Modal `AuthError` | `modal token new`, or both `MODAL_TOKEN_*` set |
