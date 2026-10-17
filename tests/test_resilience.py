@@ -152,7 +152,7 @@ async def test_run_degrades_gracefully_when_curator_dies(tmp_path, monkeypatch):
             "rationale": "r",
         }
 
-    async def fake_run(code, rows, timeout=60.0):
+    async def fake_run(code, rows, timeout=60.0, train=()):
         return {
             "score": 0.5,
             "rmse": 1.0,

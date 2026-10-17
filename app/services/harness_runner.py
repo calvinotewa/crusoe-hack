@@ -83,6 +83,9 @@ class HarnessRunner:
         self.initial_hypotheses = initial_hypotheses or []
         self.initial_memory = initial_memory
         self.memory = curation.Memory()
+        self.best_code: str | None = None
+        self.incumbent_code: str = shared_brain.NAIVE_CODE
+        self.baselines: dict = {}
         self.state: dict = {
             "id": run_id,
             "params": params,
@@ -125,6 +128,55 @@ class HarnessRunner:
         self.state["current_phase"] = phase
         await self._persist()
 
+    async def _baselines(self, numeric: list[str], train, val) -> dict:
+        """Naive mean and linear least squares, both fitted on train and scored on validation."""
+        out = {}
+        for name, code in [
+            ("naive", shared_brain.NAIVE_CODE),
+            ("linear", shared_brain.linear_baseline_code(numeric) if numeric else None),
+        ]:
+            if code is None:
+                continue
+            res = await shared_brain.run_experiment(code, val, timeout=60.0, train=train)
+            out[name] = (code, res.get("rmse"))
+        return out
+
+    async def _final_test(self, train: list[dict], test: list[dict]) -> None:
+        """Score the run's best formula and the baselines on held-out rows, once, at the end.
+
+        Everything is fitted on train only. Test rows are never shown to agents or used for
+        selection. A continued run that inherits its best from an earlier run has no code to
+        re-score, so only the baselines are reported for it.
+        """
+        baseline_test = await shared_brain.run_experiment(
+            self.incumbent_code, test, timeout=60.0, train=train
+        )
+        result = {
+            "incumbent": self.state["baseline_name"],
+            "baseline_rmse": baseline_test.get("rmse"),
+            "best_rmse": None,
+            "beats_baseline": None,
+        }
+        for name, (code, _) in self.baselines.items():
+            res = await shared_brain.run_experiment(code, test, timeout=60.0, train=train)
+            result[f"{name}_rmse"] = res.get("rmse")
+        if self.best_code is not None:
+            best = await shared_brain.run_experiment(
+                self.best_code, test, timeout=60.0, train=train
+            )
+            result["best_rmse"] = best.get("rmse")
+            if result["best_rmse"] is not None and result["baseline_rmse"] is not None:
+                result["beats_baseline"] = result["best_rmse"] < result["baseline_rmse"]
+        self.state["test"] = result
+        msg = (
+            f"held-out test: incumbent {result['incumbent']} rmse {result['baseline_rmse']}, "
+            f"best rmse {result['best_rmse']}, beats incumbent: {result['beats_baseline']}"
+            if self.best_code is not None
+            else f"held-out test: incumbent {result['incumbent']} rmse {result['baseline_rmse']}; "
+            "no formula was promoted in this run"
+        )
+        await self.log("test", msg)
+
     async def run(self) -> dict:
         p = self.params
         try:
@@ -133,9 +185,32 @@ class HarnessRunner:
                 f"run {self.run_id}: {p['agents']} agents x {p['generations']} generations,"
                 f" {p['hypotheses']} hypotheses/gen, top_k={p['top_k']}",
             )
-            hypotheses: list[str] = list(self.initial_hypotheses)
+            train, val, test = shared_brain.split_rows(self.rows)
             columns = sorted(set(self.rows[0]) - {"y"}) if self.rows else []
-            stats = row_stats(self.rows)
+            numeric = [
+                c for c in columns if all(isinstance(r.get(c), (int, float)) for r in self.rows)
+            ]
+            self.baselines = await self._baselines(numeric, train, val)
+            name, code, baseline_rmse = min(
+                ((n, c, rmse) for n, (c, rmse) in self.baselines.items() if rmse is not None),
+                key=lambda t: t[2],
+            )
+            self.incumbent_code = code
+            self.state["baseline_rmse"] = baseline_rmse
+            self.state["baseline_name"] = name
+            if self.state["best_score"] is None:
+                self.state["best_score"] = 1.0 / (1.0 + baseline_rmse)
+            await self.log(
+                "baseline",
+                "validation rmse: "
+                + ", ".join(
+                    f"{n} {rmse:.4f}" for n, (_, rmse) in self.baselines.items() if rmse is not None
+                )
+                + f" -> incumbent {name} (train {len(train)}, val {len(val)}, test {len(test)})",
+            )
+
+            hypotheses: list[str] = list(self.initial_hypotheses)
+            stats = row_stats(train)
             sem = asyncio.Semaphore(p["concurrency"])
 
             for gen in range(1, p["generations"] + 1):
@@ -183,7 +258,7 @@ class HarnessRunner:
                             return {**exp, "score": 0.0, "stderr_tail": "no code"}
                         # 60s: fitting (e.g. least squares over all rows) can be slower
                         res = await shared_brain.run_experiment(
-                            exp["code"], self.rows, timeout=60.0
+                            exp["code"], val, timeout=60.0, train=train
                         )
                         return {**exp, **res}
 
@@ -210,10 +285,11 @@ class HarnessRunner:
                     scored,
                     gen,
                     incumbent_loss,
-                    lambda code: shared_brain.verify_experiment(code, self.rows),
+                    lambda code: shared_brain.verify_experiment(code, val, train=train),
                 )
                 if promoted is not None:
                     self.state["best_score"] = 1.0 / (1.0 + promoted.loss)
+                    self.best_code = promoted.experiment["code"]
                 summary = self.memory.render() or "(no verified learnings yet)"
                 await self.log(
                     "curate",
@@ -295,6 +371,7 @@ class HarnessRunner:
                 await self._persist()
                 hypotheses = next_hypotheses
 
+            await self._final_test(train, test)
             self.state["status"] = "completed"
             await self.log("done", f"run finished, best score {self.state['best_score']}")
         except asyncio.CancelledError:

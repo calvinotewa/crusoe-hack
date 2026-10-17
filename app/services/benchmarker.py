@@ -45,13 +45,13 @@ def _coerce(row: dict) -> dict:
     return out
 
 
-def build_program(code: str, rows: list[dict]) -> str:
-    """Wrap an experiment plus the validation rows in a benchmark program.
+def build_program(code: str, rows: list[dict], train: list[dict] | tuple = ()) -> str:
+    """Wrap an experiment plus the rows to score in a benchmark program.
 
     Contract: `code` defines `predict(row)` — or, for calibratable models,
-    `fit(rows) -> params` + `predict(row, params)`. If `fit` exists it runs once
-    on all rows (closed-form least squares is pure stdlib), and `predict` gets
-    the fitted params; a single-arg `predict` falls back automatically.
+    `fit(rows) -> params` + `predict(row, params)`. `fit` receives only the training split
+    (`train`), so the scored rows never influence the fit. `predict` receives features only:
+    the target `y` is stripped before the call. A single-arg `predict` falls back automatically.
     """
     return f"""
 import json, math, statistics
@@ -62,18 +62,19 @@ exec({code!r}, ns)
 rows = {rows!r}
 pred = ns.get("predict")
 fit = ns.get("fit")
-params = fit(rows) if callable(fit) else None
+params = fit({list(train)!r}) if callable(fit) else None
 
 errs, abs_errs, ys, skipped = [], [], [], 0
 for row in rows:
     try:
+        features = {{k: v for k, v in row.items() if k != "y"}}
         if params is not None:
             try:
-                p = pred(row, params)
+                p = pred(features, params)
             except TypeError:  # single-arg predict
-                p = pred(row)
+                p = pred(features)
         else:
-            p = pred(row)
+            p = pred(features)
         y = row["y"]
         if p is None or not isinstance(p, (int, float)) or math.isnan(float(p)):
             skipped += 1

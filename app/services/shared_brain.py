@@ -75,11 +75,12 @@ Current best score (1/(1+rmse), higher is better): {best}
 Inherited learnings:
 {memory}
 
-Your experiment must be a CALIBRATED model as Python:
+Your experiment must be a CALIBRATED model as Python. fit() sees only the training
+rows; your score is measured on rows it has not seen:
 
 ```python
 def fit(rows: list[dict]) -> object:
-    # Derive your model's parameters from the rows. PREFER closed-form least
+    # Derive your model's parameters from the training rows. PREFER closed-form least
     # squares: choose basis functions, build the design matrix, solve the
     # normal equations with Gaussian elimination (pure stdlib math only).
     ...
@@ -135,12 +136,70 @@ def repair_code(code: str) -> str:
     return code
 
 
-async def run_experiment(code: str, rows: list[dict], timeout: float = 20.0) -> dict:
-    """Run one experiment (a predict() over the validation rows) in a subprocess.
+NAIVE_CODE = (
+    "def fit(rows):\n"
+    "    return sum(r['y'] for r in rows) / len(rows)\n\n"
+    "def predict(row, params):\n"
+    "    return params\n"
+)
+
+
+LINEAR_BASELINE_TEMPLATE = """
+def feats(r):
+    return [1.0] + [r[c] for c in COLUMNS]
+
+def fit(rows):
+    X = [feats(r) for r in rows]
+    y = [r["y"] for r in rows]
+    k = len(X[0])
+    A = [[sum(X[i][a] * X[i][b] for i in range(len(X))) for b in range(k)] for a in range(k)]
+    for i in range(k):
+        A[i][i] += 1e-9
+    v = [sum(X[i][a] * y[i] for i in range(len(X))) for a in range(k)]
+    for i in range(k):
+        for j in range(i + 1, k):
+            f = A[j][i] / A[i][i]
+            for m in range(i, k):
+                A[j][m] -= f * A[i][m]
+            v[j] -= f * v[i]
+    w = [0.0] * k
+    for i in reversed(range(k)):
+        w[i] = (v[i] - sum(A[i][m] * w[m] for m in range(i + 1, k))) / A[i][i]
+    return w
+
+def predict(row, w):
+    return sum(a * b for a, b in zip(w, feats(row)))
+"""
+
+
+def linear_baseline_code(columns: list[str]) -> str:
+    """Ordinary least squares on the raw numeric columns: the benchmark a formula must beat."""
+    return f"COLUMNS = {list(columns)!r}\n" + LINEAR_BASELINE_TEMPLATE
+
+
+def split_rows(
+    rows: list[dict], seed: int = 42, fractions: tuple[float, float, float] = (0.70, 0.15, 0.15)
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Deterministic train / validation / test split. Agents never see test rows."""
+    shuffled = list(rows)
+    random.Random(seed).shuffle(shuffled)
+    n_train = int(len(shuffled) * fractions[0])
+    n_val = int(len(shuffled) * fractions[1])
+    return (
+        shuffled[:n_train],
+        shuffled[n_train : n_train + n_val],
+        shuffled[n_train + n_val :],
+    )
+
+
+async def run_experiment(
+    code: str, rows: list[dict], timeout: float = 20.0, train: list[dict] | tuple = ()
+) -> dict:
+    """Run one experiment: fit on `train`, predict and score `rows`, in a subprocess.
 
     Returns {metrics..., exit_code, stderr_tail}. A crashing/slow experiment scores 0.
     """
-    program = build_program(repair_code(code or ""), rows)
+    program = build_program(repair_code(code or ""), rows, train)
     proc = await asyncio.create_subprocess_exec(
         "python",
         "-c",
@@ -169,7 +228,7 @@ async def run_experiment(code: str, rows: list[dict], timeout: float = 20.0) -> 
 
 
 async def verify_experiment(
-    code: str, rows: list[dict], resamples: int = 3, seed: int = 0
+    code: str, rows: list[dict], train: list[dict] | tuple = (), resamples: int = 3, seed: int = 0
 ) -> list[float]:
     """Re-run an experiment on bootstrap resamples of the validation rows.
 
@@ -180,7 +239,7 @@ async def verify_experiment(
     losses = []
     for _ in range(resamples):
         sample = [rng.choice(rows) for _ in rows]
-        res = await run_experiment(code, sample)
+        res = await run_experiment(code, sample, train=train)
         rmse = res.get("rmse")
         losses.append(float(rmse) if rmse is not None and math.isfinite(rmse) else math.inf)
     return losses

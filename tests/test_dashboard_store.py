@@ -86,7 +86,7 @@ async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
         seen[n] = (hyp, mem, best)
         return {"name": f"a{n}", "expression": "y", "code": "def predict(row):\n    return 0.5"}
 
-    async def fake_run(code, rows, timeout=20.0):
+    async def fake_run(code, rows, timeout=20.0, train=()):
         return {
             "score": 0.4,
             "rmse": 1.5,
@@ -129,7 +129,7 @@ async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
     runner = HarnessRunner(
         params,
         "goal",
-        [{"a": 1.0, "y": 2.0}],
+        [{"a": float(i), "b": 1.0, "y": 2.0 + i} for i in range(40)],
         store,
         run["id"],
         initial_hypotheses=["inh1", "inh2", "inh3"],
@@ -139,6 +139,7 @@ async def test_runner_inherits_state(tmp_path: Path, monkeypatch):
     await runner.run()
     hyp, mem, best = seen[1]
     assert hyp == "inh1" and "inherited memory" in mem and best == 0.71
+    assert runner.state["test"]["best_rmse"] is None  # inherited best has no code here
     got = await store.get_run(run["id"])
     assert got["best_score"] == 0.71  # inherited best is kept (new gens scored lower)
     assert got["generations"][0]["hypotheses"] == ["h0", "h1", "h2"]  # fixed count kept

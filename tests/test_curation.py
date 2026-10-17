@@ -115,10 +115,9 @@ class FakeStore:
         self.generations.append(record)
 
 
-@pytest.mark.asyncio
-async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch):
-    """Gen 1 promotes its verified top. Gen 2 improves within the noise floor, so no promotion."""
-    rounds = iter([0.5, 0.4995])
+def install_fakes(monkeypatch, proposals, baseline_rmse=1.0, linear_rmse=2.0):
+    """Patch shared_brain so the runner sees a naive baseline and scripted candidate losses."""
+    rounds = iter(proposals)
 
     async def fake_agent(n, goal, columns, hyp, mem, best, stats=""):
         return {
@@ -128,10 +127,15 @@ async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch
             "hypothesis": hyp,
         }
 
-    async def fake_run(code, rows, timeout=20.0):
-        return {"rmse": float(code.split("=")[1]), "score": 1 / (1 + float(code.split("=")[1]))}
+    async def fake_run(code, rows, timeout=20.0, train=()):
+        if code == shared_brain.NAIVE_CODE:
+            return {"rmse": baseline_rmse, "score": 1 / (1 + baseline_rmse)}
+        if "COLUMNS" in code:
+            return {"rmse": linear_rmse, "score": 1 / (1 + linear_rmse)}
+        rmse = float(code.split("=")[1])
+        return {"rmse": rmse, "score": 1 / (1 + rmse)}
 
-    async def fake_verify(code, rows, resamples=3, seed=0):
+    async def fake_verify(code, rows, train=(), resamples=3, seed=0):
         return [float(code.split("=")[1])] * 3
 
     async def fake_gap(summary):
@@ -150,17 +154,23 @@ async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch
     monkeypatch.setattr(shared_brain, "web_search", fake_search)
     monkeypatch.setattr(shared_brain, "generate_hypotheses", fake_hyps)
 
-    rows = [{"x": 1.0, "y": 1.0}]
-    params = {
-        "agents": 1,
-        "generations": 2,
-        "hypotheses": 1,
-        "top_k": 1,
-        "concurrency": 1,
-        "sources": 0,
-    }
-    store = FakeStore()
-    runner = harness_runner.HarnessRunner(params, "goal", rows, store, "run1")
+
+ROWS = [{"x": float(i), "y": float(i) * 2} for i in range(60)]
+PARAMS = {
+    "agents": 1,
+    "generations": 2,
+    "hypotheses": 1,
+    "top_k": 1,
+    "concurrency": 1,
+    "sources": 0,
+}
+
+
+@pytest.mark.asyncio
+async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch):
+    """Gen 1 beats the naive baseline and is promoted. Gen 2 improves within the noise floor."""
+    install_fakes(monkeypatch, [0.5, 0.4995])
+    runner = harness_runner.HarnessRunner(PARAMS, "goal", ROWS, FakeStore(), "run1")
     state = await runner.run()
 
     assert state["status"] == "completed"
@@ -168,3 +178,88 @@ async def test_harness_runner_moves_best_only_after_replicated_claim(monkeypatch
     assert state["best_score"] == pytest.approx(1 / 1.5)
     assert any(e.kind == "best" for e in runner.memory.entries.values())
     assert "best" in state["generations"][1]["summary"]
+    assert state["test"]["beats_baseline"] is True
+
+
+@pytest.mark.asyncio
+async def test_naive_baseline_is_the_incumbent_so_worse_formulas_never_become_best(monkeypatch):
+    install_fakes(monkeypatch, [2.0, 3.0], baseline_rmse=1.0)
+    runner = harness_runner.HarnessRunner(PARAMS, "goal", ROWS, FakeStore(), "run2")
+    state = await runner.run()
+
+    assert state["baseline_rmse"] == 1.0
+    assert state["best_score"] == pytest.approx(1 / 2.0)
+    assert not any(e.kind == "best" for e in runner.memory.entries.values())
+    assert state["test"]["best_rmse"] is None
+    assert state["test"]["beats_baseline"] is None
+
+
+@pytest.mark.asyncio
+async def test_held_out_test_rows_are_never_passed_to_agents_or_selection(monkeypatch):
+    install_fakes(monkeypatch, [0.5, 0.5])
+    seen = []
+    original = shared_brain.run_experiment
+
+    async def spy(code, rows, timeout=20.0, train=()):
+        seen.append((code, {r["x"] for r in rows}))
+        return await original(code, rows, timeout=timeout, train=train)
+
+    monkeypatch.setattr(shared_brain, "run_experiment", spy)
+    runner = harness_runner.HarnessRunner(PARAMS, "goal", ROWS, FakeStore(), "run3")
+    await runner.run()
+
+    _, _, test = shared_brain.split_rows(ROWS)
+    test_xs = {r["x"] for r in test}
+    touching = [i for i, (_, xs) in enumerate(seen) if xs & test_xs]
+    assert touching == list(range(len(seen) - 4, len(seen)))
+    assert seen[-1][0] == "rmse=0.5"
+
+
+def test_split_is_deterministic_and_disjoint():
+    train, val, test = shared_brain.split_rows(ROWS)
+    assert len(train) + len(val) + len(test) == len(ROWS)
+    keys = [{r["x"] for r in part} for part in (train, val, test)]
+    assert not (keys[0] & keys[1]) and not (keys[0] & keys[2]) and not (keys[1] & keys[2])
+    assert shared_brain.split_rows(ROWS) == (train, val, test)
+
+
+def test_build_program_hides_target_from_predict_and_fits_on_train_only():
+    from app.services import benchmarker
+
+    rows = [{"a": 1.0, "y": 999.0}]
+    code = (
+        "def fit(rows):\n"
+        "    return rows[0]['y']\n"
+        "def predict(row, params):\n"
+        "    assert 'y' not in row\n"
+        "    return params\n"
+    )
+    program = benchmarker.build_program(code, rows, train=[{"a": 0.0, "y": 7.0}])
+    import contextlib
+    import io
+    import json
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(program, {})  # noqa: S102 - the harness's own benchmark wrapper
+    metrics = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert metrics["n"] == 1 and metrics["rmse"] == pytest.approx(992.0)
+
+
+@pytest.mark.asyncio
+async def test_stronger_linear_baseline_becomes_the_incumbent(monkeypatch):
+    install_fakes(monkeypatch, [5.0, 5.0], baseline_rmse=3.0, linear_rmse=1.0)
+    runner = harness_runner.HarnessRunner(PARAMS, "goal", ROWS, FakeStore(), "run4")
+    state = await runner.run()
+
+    assert state["baseline_name"] == "linear"
+    assert state["baseline_rmse"] == 1.0
+    assert state["test"]["incumbent"] == "linear"
+
+
+def test_linear_baseline_recovers_exact_linear_relationship():
+    code = shared_brain.linear_baseline_code(["a"])
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102 - the generated baseline itself
+    params = ns["fit"]([{"a": 1.0, "y": 3.0}, {"a": 2.0, "y": 5.0}, {"a": 3.0, "y": 7.0}])
+    assert ns["predict"]({"a": 10.0}, params) == pytest.approx(21.0, abs=1e-6)

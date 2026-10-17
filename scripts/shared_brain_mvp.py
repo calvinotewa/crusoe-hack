@@ -62,6 +62,7 @@ async def run_generation(
     best: float | None,
 ) -> tuple[float | None, str, str, list[str], list[dict]]:
     """One pass of steps 1-5. Returns (best_score, summary, memory, hypotheses, experiments)."""
+    train, val, _ = shared_brain.split_rows(rows)
     columns = sorted(set(rows[0]) - {"y"})
     n_agents = args.agents
 
@@ -85,7 +86,7 @@ async def run_generation(
         async with sem:
             if not exp.get("code"):
                 return {**exp, "score": 0.0, "stderr_tail": "no code"}
-            return {**exp, **(await shared_brain.run_experiment(exp["code"], rows))}
+            return {**exp, **(await shared_brain.run_experiment(exp["code"], val, train=train))}
 
     log.info("gen %d: running all %d experiments...", gen, len(experiments))
     experiments = list(await asyncio.gather(*[run_one(e) for e in experiments]))
