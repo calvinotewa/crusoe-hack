@@ -42,6 +42,10 @@ Rules for the memory:
 - **Conflict-free:** only the curator writes to it, and contradictions are settled by an experiment.
 - **Versioned:** every change is saved.
 
+### Why Crusoe MemoryAlloy
+
+Every researcher's prompt starts with the same memory, so Crusoe's [MemoryAlloy](https://crusoe.ai/resources/blog/crusoe-memoryalloy-reinventing-kv-caching-for-cluster-scale-inference) reads it once and reuses that work for the other researchers. Sharing memory stays cheap and fast: each researcher pays less and starts answering sooner.
+
 ## Files
 
 | File | Access |
@@ -82,6 +86,8 @@ We test on three different kinds of problem: a yes/no prediction, a time-series 
 | `remove_memory` | Delete a memory |
 | `run_code` | Edit and run `train.py` within a fixed budget; returns val loss |
 | `web_search` | Look up papers and techniques |
+
+The memory tools are our own, backed by Neon Postgres. Crusoe has no memory API.
 
 ## Agents
 
@@ -143,7 +149,7 @@ We track four metrics per generation:
 - **Quality:** fitness on the test split.
 - **Waste:** runs that repeat a known dead end.
 - **Memory size:** stays flat while the raw log grows.
-- **Cost:** tokens and time-to-first-token per agent. The memory is a shared prompt prefix, so Crusoe's KV cache reuses it.
+- **Cost:** tokens and time-to-first-token per agent (see [Why Crusoe MemoryAlloy](#why-crusoe-memoryalloy)).
 
 ## Models (Crusoe Managed Inference)
 
